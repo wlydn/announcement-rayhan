@@ -153,11 +153,9 @@ Response: {
 ```javascript
 // Muncul di console:
 "Upload error: error message here"
-Test dengan command:
-fetch('/api/audio', {
-  method: 'POST',
-  body: formData // FormData dengan file audio
-}).then(r => r.json()).then(console.log).catch(console.error)
+Test dari aplikasi:
+// uploadAudioFile(file) akan meminta token ke /api/audio/upload
+// lalu browser mengirim file langsung ke Vercel Blob
 ```
 
 #### Audio Playback Error:
@@ -207,7 +205,7 @@ Jika masih error setelah semua langkah, kumpulkan:
 
 1. **Network Tab** (F12 → Network):
    - Lakukan upload
-   - Cari request ke `/api/audio` → lihat Response
+   - Cari request ke `/api/audio/upload` → lihat Response
    - Copy **full error response**
 
 2. **Console Errors** (F12 → Console):

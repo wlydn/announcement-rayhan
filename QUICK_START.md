@@ -103,7 +103,7 @@ cat .env.local | findstr BLOB_READ_WRITE_TOKEN
 npm list @vercel/blob
 
 # 3. Open Console di browser (F12):
-# Upload file, cek network tab → /api/audio request
+# Upload file, cek network tab → /api/audio/upload request
 # Lihat response: {"error": "..."}
 ```
 

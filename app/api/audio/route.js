@@ -1,97 +1,4 @@
-import { put, del } from '@vercel/blob';
-import { randomBytes } from 'crypto';
-
-export const maxDuration = 60; // Increase timeout to 60 seconds for large file uploads
-
-function generateId() {
-  return `${Date.now()}-${randomBytes(3).toString('hex')}`;
-}
-
-export async function POST(request) {
-  try {
-    const formData = await request.formData();
-    const file = formData.get('file');
-
-    if (!file) {
-      return new Response(
-        JSON.stringify({ error: 'No file provided' }),
-        { 
-          status: 400, 
-          headers: { 
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*',
-          } 
-        }
-      );
-    }
-
-    // Generate unique blob filename
-    const ext = file.name?.split('.')?.pop() || 'mp3';
-    const blobFileName = `audio-${generateId()}.${ext}`;
-
-    // Convert File to Buffer
-    const buffer = Buffer.from(await file.arrayBuffer());
-
-    console.log('Uploading file to Vercel Blob:', {
-      fileName: file.name,
-      fileSize: buffer.length,
-      fileType: file.type,
-    });
-
-    // Upload to Vercel Blob
-    const blob = await put(blobFileName, buffer, {
-      access: 'public',
-      contentType: file.type || 'audio/mpeg',
-    });
-
-    console.log('Upload success to Vercel Blob:', {
-      blobId: blob.pathname,
-      url: blob.url,
-      size: buffer.length,
-    });
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        blobId: blob.pathname,
-        url: blob.url,
-        size: buffer.length,
-      }),
-      { 
-        status: 200, 
-        headers: { 
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        } 
-      }
-    );
-  } catch (error) {
-    console.error('Upload error:', error);
-
-    let errorMessage = 'Upload failed';
-    if (error.message.includes('token')) {
-      errorMessage = 'Vercel Blob authentication failed. Check BLOB_READ_WRITE_TOKEN.';
-    } else if (error.message.includes('size')) {
-      errorMessage = 'File size exceeds limit.';
-    } else if (error.message.includes('network') || error.message.includes('fetch')) {
-      errorMessage = 'Network error during upload. Please try again.';
-    }
-
-    return new Response(
-      JSON.stringify({
-        error: errorMessage,
-        details: error.message,
-      }),
-      { 
-        status: 500, 
-        headers: { 
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        } 
-      }
-    );
-  }
-}
+import { del } from '@vercel/blob';
 
 export async function DELETE(request) {
   try {
@@ -188,12 +95,12 @@ export async function DELETE(request) {
   }
 }
 
-export async function OPTIONS(request) {
+export async function OPTIONS() {
   return new Response(null, {
     status: 200,
     headers: {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+      'Access-Control-Allow-Methods': 'DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Accept',
       'Access-Control-Max-Age': '86400',
     },

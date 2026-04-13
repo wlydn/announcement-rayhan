@@ -31,23 +31,24 @@ BLOB_READ_WRITE_TOKEN=your-token-here
 
 ## API Routes
 
-### POST `/api/audio`
-Upload file audio ke Vercel Blob
+### POST `/api/audio/upload`
+Generate client token untuk upload langsung dari browser ke Vercel Blob.
+Route ini dipakai internal oleh `lib/blob.js` melalui `@vercel/blob/client`.
 ```javascript
-const formData = new FormData();
-formData.append('file', file);
-const response = await fetch('/api/audio', {
-  method: 'POST',
-  body: formData
+import { upload } from '@vercel/blob/client';
+
+const response = await upload('audio/example.mp3', file, {
+  access: 'public',
+  contentType: file.type,
+  handleUploadUrl: '/api/audio/upload',
+  multipart: file.size > 10 * 1024 * 1024,
 });
 ```
 Response:
 ```json
 {
-  "success": true,
-  "blobId": "audio-1234567890-abc123",
   "url": "https://blob.vercel-storage.com/...",
-  "size": 123456
+  "pathname": "audio/example.mp3"
 }
 ```
 
@@ -57,8 +58,26 @@ Delete audio dari Vercel Blob
 const response = await fetch('/api/audio', {
   method: 'DELETE',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ blobId: 'audio-1234567890-abc123' })
+  body: JSON.stringify({ blobId: 'audio/example.mp3' })
 });
+```
+Response:
+```json
+{
+  "success": true,
+  "message": "File deleted successfully",
+  "deletedTarget": "/audio/example.mp3"
+}
+```
+
+### Upload Result Metadata
+Upload sukses akan mengembalikan metadata blob seperti:
+```json
+{
+  "blobId": "audio/example.mp3",
+  "url": "https://blob.vercel-storage.com/...",
+  "size": 123456
+}
 ```
 
 ## Data Storage Structure
@@ -104,7 +123,7 @@ const response = await fetch('/api/audio', {
 - Pastikan `.env.local` ada di local development
 
 ### Upload Failed
-- Pastikan file < 250MB (limit Vercel Blob)
+- Pastikan file < 50MB (limit aplikasi saat ini)
 - Check network connection
 - Lihat browser console untuk error details
 
