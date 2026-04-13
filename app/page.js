@@ -7,6 +7,7 @@ import {
   deleteSharedAnnouncement,
   getSharedAudioConfig,
   setSharedBackground,
+  setSharedBackgroundSchedule,
   toggleSharedAnnouncement,
 } from '../lib/audio-config';
 
@@ -44,6 +45,11 @@ const DEFAULT_PRAYER_API_CACHE = {
   timings: DEFAULT_PRAYER_TIMES,
 };
 
+const DEFAULT_BACKGROUND_SCHEDULE = {
+  startTime: '00:00',
+  endTime: '23:59',
+};
+
 const STORAGE_KEYS = {
   manualPrayerTimes: 'app-prayer-times-v2',
   prayerPauseMinutes: 'app-prayer-pause-minutes-v1',
@@ -51,7 +57,6 @@ const STORAGE_KEYS = {
   prayerConfig: 'app-prayer-config-v2',
   prayerApiCache: 'app-prayer-api-cache-v2',
   settings: 'app-settings-v1',
-  backgroundSchedule: 'app-background-schedule-v1',
 };
 
 const PRAYER_METHOD_OPTIONS = [
@@ -219,8 +224,8 @@ export default function Page() {
   const [backgroundUrl, setBackgroundUrl] = useState('');
   const [backgroundEnabled, setBackgroundEnabled] = useState(true);
   const [backgroundVolume, setBackgroundVolume] = useState(0.35);
-  const [backgroundStartTime, setBackgroundStartTime] = useState('00:00');
-  const [backgroundEndTime, setBackgroundEndTime] = useState('23:59');
+  const [backgroundStartTime, setBackgroundStartTime] = useState(DEFAULT_BACKGROUND_SCHEDULE.startTime);
+  const [backgroundEndTime, setBackgroundEndTime] = useState(DEFAULT_BACKGROUND_SCHEDULE.endTime);
   const [showBackgroundScheduleModal, setShowBackgroundScheduleModal] = useState(false);
 
   const [announcements, setAnnouncements] = useState([]);
@@ -296,23 +301,6 @@ export default function Page() {
 
   function persistSettings(value) {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(value));
-  }
-
-  function persistBackgroundSchedule(startTime, endTime) {
-    localStorage.setItem(STORAGE_KEYS.backgroundSchedule, JSON.stringify({ startTime, endTime }));
-  }
-
-  function loadBackgroundSchedule() {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEYS.backgroundSchedule);
-      if (stored) {
-        const { startTime, endTime } = JSON.parse(stored);
-        if (startTime) setBackgroundStartTime(startTime);
-        if (endTime) setBackgroundEndTime(endTime);
-      }
-    } catch (err) {
-      console.warn('Failed to load background schedule', err);
-    }
   }
 
   async function safelyPlay(audioEl) {
@@ -575,6 +563,7 @@ export default function Page() {
       const savedPrayerConfig = localStorage.getItem(STORAGE_KEYS.prayerConfig);
       const savedPrayerApiCache = localStorage.getItem(STORAGE_KEYS.prayerApiCache);
       const savedSettings = localStorage.getItem(STORAGE_KEYS.settings);
+      const legacyBackgroundSchedule = localStorage.getItem('app-background-schedule-v1');
 
       if (savedManualPrayerTimes) setManualPrayerTimes(JSON.parse(savedManualPrayerTimes));
       if (savedPrayerPauseMinutes) setPrayerPauseMinutes(Number(savedPrayerPauseMinutes));
@@ -603,15 +592,31 @@ export default function Page() {
         if (typeof parsed.backgroundVolume === 'number') setBackgroundVolume(parsed.backgroundVolume);
         if (typeof parsed.announcementVolume === 'number') setAnnouncementVolume(parsed.announcementVolume);
       }
-
-      loadBackgroundSchedule();
-
       try {
-        const sharedAudioConfig = await getSharedAudioConfig();
+        let sharedAudioConfig = await getSharedAudioConfig();
         if (cancelled) return;
+
+        if (
+          legacyBackgroundSchedule &&
+          sharedAudioConfig.backgroundSchedule?.startTime === DEFAULT_BACKGROUND_SCHEDULE.startTime &&
+          sharedAudioConfig.backgroundSchedule?.endTime === DEFAULT_BACKGROUND_SCHEDULE.endTime
+        ) {
+          try {
+            const parsedLegacySchedule = JSON.parse(legacyBackgroundSchedule);
+            sharedAudioConfig = await setSharedBackgroundSchedule({
+              startTime: parsedLegacySchedule?.startTime || DEFAULT_BACKGROUND_SCHEDULE.startTime,
+              endTime: parsedLegacySchedule?.endTime || DEFAULT_BACKGROUND_SCHEDULE.endTime,
+            });
+            localStorage.removeItem('app-background-schedule-v1');
+          } catch (migrationError) {
+            console.warn('Failed to migrate legacy background schedule:', migrationError);
+          }
+        }
 
         setBackgroundMeta(sharedAudioConfig.background);
         setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
+        setBackgroundStartTime(sharedAudioConfig.backgroundSchedule?.startTime || DEFAULT_BACKGROUND_SCHEDULE.startTime);
+        setBackgroundEndTime(sharedAudioConfig.backgroundSchedule?.endTime || DEFAULT_BACKGROUND_SCHEDULE.endTime);
       } catch (error) {
         console.error('Failed to load shared audio config:', error);
         if (!cancelled) {
@@ -912,10 +917,21 @@ export default function Page() {
     }
   }
 
-  function handleSaveBackgroundSchedule() {
-    persistBackgroundSchedule(backgroundStartTime, backgroundEndTime);
-    setShowBackgroundScheduleModal(false);
-    pushStatus('Jadwal backsound disimpan.', 'success');
+  async function handleSaveBackgroundSchedule() {
+    try {
+      const sharedAudioConfig = await setSharedBackgroundSchedule({
+        startTime: backgroundStartTime,
+        endTime: backgroundEndTime,
+      });
+
+      setBackgroundStartTime(sharedAudioConfig.backgroundSchedule?.startTime || DEFAULT_BACKGROUND_SCHEDULE.startTime);
+      setBackgroundEndTime(sharedAudioConfig.backgroundSchedule?.endTime || DEFAULT_BACKGROUND_SCHEDULE.endTime);
+      setShowBackgroundScheduleModal(false);
+      pushStatus('Jadwal backsound disimpan untuk semua perangkat.', 'success');
+    } catch (error) {
+      console.error('Error saving shared background schedule:', error);
+      pushStatus(`Gagal menyimpan jadwal backsound: ${error.message}`, 'error');
+    }
   }
 
   async function handleSaveAnnouncement() {

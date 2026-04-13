@@ -4,11 +4,16 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 const CONFIG_PATH = 'config/audio-library.json';
+const DEFAULT_BACKGROUND_SCHEDULE = {
+  startTime: '00:00',
+  endTime: '23:59',
+};
 
 function createDefaultLibrary() {
   return {
     background: null,
     announcements: [],
+    backgroundSchedule: DEFAULT_BACKGROUND_SCHEDULE,
   };
 }
 
@@ -51,6 +56,20 @@ function normalizeAnnouncement(announcement) {
   };
 }
 
+function normalizeBackgroundSchedule(backgroundSchedule) {
+  const startTime = String(backgroundSchedule?.startTime || DEFAULT_BACKGROUND_SCHEDULE.startTime);
+  const endTime = String(backgroundSchedule?.endTime || DEFAULT_BACKGROUND_SCHEDULE.endTime);
+
+  if (!startTime.includes(':') || !endTime.includes(':')) {
+    return DEFAULT_BACKGROUND_SCHEDULE;
+  }
+
+  return {
+    startTime,
+    endTime,
+  };
+}
+
 function normalizeLibrary(data) {
   const base = createDefaultLibrary();
 
@@ -60,6 +79,7 @@ function normalizeLibrary(data) {
     announcements: Array.isArray(data?.announcements)
       ? data.announcements.map(normalizeAnnouncement).filter(Boolean).sort((a, b) => a.time.localeCompare(b.time))
       : base.announcements,
+    backgroundSchedule: normalizeBackgroundSchedule(data?.backgroundSchedule),
   };
 }
 
@@ -139,7 +159,19 @@ export async function POST(request) {
         background: updatedLibrary.background,
         previousBackground: currentLibrary.background,
         announcements: updatedLibrary.announcements,
+        backgroundSchedule: updatedLibrary.backgroundSchedule,
       });
+    }
+
+    if (action === 'set-background-schedule') {
+      const nextBackgroundSchedule = normalizeBackgroundSchedule(body.backgroundSchedule);
+
+      const updatedLibrary = await writeLibrary({
+        ...currentLibrary,
+        backgroundSchedule: nextBackgroundSchedule,
+      });
+
+      return jsonResponse(updatedLibrary);
     }
 
     if (action === 'add-announcement') {

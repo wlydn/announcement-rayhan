@@ -66,7 +66,7 @@ Buka `http://localhost:3000`
 - Jika izin lokasi browser ditolak, Anda tetap bisa isi `latitude` dan `longitude` manual.
 - Jika ingin sepenuhnya manual, ubah mode ke **Manual** lalu isi jam sholat langsung.
 - File audio disimpan di Vercel Blob. Metadata audio utama dibaca dari shared storage, sedangkan jadwal sholat dan preferensi lokal tetap ada di `localStorage` browser.
-- Jika dibuka di perangkat lain, backsound aktif dan daftar announcement tetap ikut termuat, tetapi pengaturan lokal seperti volume, unlock audio, dan jadwal sholat lokal tetap mengikuti browser tersebut.
+- Jika dibuka di perangkat lain, backsound aktif, daftar announcement, dan jadwal backsound tetap ikut termuat, tetapi pengaturan lokal seperti volume, unlock audio, dan jadwal sholat lokal tetap mengikuti browser tersebut.
 - Browser modern membatasi autoplay. Tombol **Aktifkan Audio** memang wajib diklik sekali setelah halaman dibuka.
 
 ## Struktur singkat
