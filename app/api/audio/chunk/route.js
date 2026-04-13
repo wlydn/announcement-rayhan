@@ -1,16 +1,22 @@
 import { randomBytes } from 'crypto';
-import * as fs from 'fs';
-import * as path from 'path';
 
-const tempDir = '/tmp/audio-chunks';
+// Store chunks in memory with expiration (cleaned up after 1 hour)
+const chunkStorage = new Map();
+const CHUNK_TTL = 60 * 60 * 1000; // 1 hour
 
-// Ensure temp directory exists
-if (!fs.existsSync(tempDir)) {
-  fs.mkdirSync(tempDir, { recursive: true });
-}
+// Cleanup function for expired chunks
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, session] of chunkStorage.entries()) {
+    if (now - session.createdAt > CHUNK_TTL) {
+      console.log(`Cleaning up expired chunks for session: ${sessionId}`);
+      chunkStorage.delete(sessionId);
+    }
+  }
+}, 5 * 60 * 1000); // Run cleanup every 5 minutes
 
 function generateSessionId(fileName, fileSize) {
-  return `${fileName}-${fileSize}`;
+  return `${fileName}-${fileSize}-${Date.now()}`;
 }
 
 export const maxDuration = 60;
@@ -32,39 +38,27 @@ export async function POST(request) {
       );
     }
 
-    // Create session ID and directory
+    // Create session ID
     const sessionId = generateSessionId(fileName, fileSize);
-    const sessionDir = path.join(tempDir, sessionId);
     
-    if (!fs.existsSync(sessionDir)) {
-      fs.mkdirSync(sessionDir, { recursive: true });
+    // Initialize session if not exists
+    if (!chunkStorage.has(sessionId)) {
+      chunkStorage.set(sessionId, {
+        chunks: new Map(),
+        fileName,
+        fileType,
+        fileSize: parseInt(fileSize),
+        totalChunks: parseInt(totalChunks),
+        createdAt: Date.now(),
+      });
     }
 
-    // Save chunk to disk
-    const chunkPath = path.join(sessionDir, `chunk-${chunkIndex}`);
+    const session = chunkStorage.get(sessionId);
     const buffer = Buffer.from(await chunk.arrayBuffer());
-    fs.writeFileSync(chunkPath, buffer);
+    session.chunks.set(parseInt(chunkIndex), buffer);
 
-    console.log(`Chunk ${chunkIndex}/${totalChunks} saved for ${fileName}`);
-
-    // Save metadata
-    const metaPath = path.join(sessionDir, 'meta.json');
-    const meta = {
-      fileName,
-      fileType,
-      fileSize: parseInt(fileSize),
-      totalChunks: parseInt(totalChunks),
-      createdAt: Date.now(),
-    };
-    fs.writeFileSync(metaPath, JSON.stringify(meta));
-
-    // Check if all chunks received
-    let receivedCount = 0;
-    for (let i = 0; i < parseInt(totalChunks); i++) {
-      if (fs.existsSync(path.join(sessionDir, `chunk-${i}`))) {
-        receivedCount++;
-      }
-    }
+    const receivedCount = session.chunks.size;
+    console.log(`Chunk ${chunkIndex}/${totalChunks - 1} received for ${fileName} (${receivedCount}/${totalChunks} total)`);
 
     return new Response(
       JSON.stringify({
@@ -101,3 +95,6 @@ export async function OPTIONS() {
     },
   });
 }
+
+// Export for finalize endpoint
+export { chunkStorage };

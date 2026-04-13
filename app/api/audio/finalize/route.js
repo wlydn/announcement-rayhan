@@ -1,42 +1,52 @@
 import { put } from '@vercel/blob';
-import * as fs from 'fs';
-import * as path from 'path';
 import { randomBytes } from 'crypto';
 
-const tempDir = '/tmp/audio-chunks';
+// Import chunkStorage from chunk endpoint
+let chunkStorage;
+
+// Dynamic import to get chunkStorage
+async function getChunkStorage() {
+  if (!chunkStorage) {
+    const chunkModule = await import('../chunk/route.js');
+    chunkStorage = chunkModule.chunkStorage;
+  }
+  return chunkStorage;
+}
 
 function generateId() {
   return `${Date.now()}-${randomBytes(3).toString('hex')}`;
-}
-
-function generateSessionId(fileName, fileSize) {
-  return `${fileName}-${fileSize}`;
 }
 
 export const maxDuration = 120; // Allow 2 minutes for merging and uploading
 
 export async function POST(request) {
   try {
-    const { fileName, fileType, totalChunks, fileSize } = await request.json();
+    const { fileName, fileType, totalChunks, fileSize, sessionId } = await request.json();
 
-    if (!fileName || !totalChunks) {
+    if (!fileName || !totalChunks || !sessionId) {
       return new Response(
-        JSON.stringify({ error: 'Missing required fields' }),
+        JSON.stringify({ error: 'Missing required fields: fileName, totalChunks, sessionId' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       );
     }
 
-    const sessionId = generateSessionId(fileName, fileSize);
-    const sessionDir = path.join(tempDir, sessionId);
+    const storage = await getChunkStorage();
+    const session = storage.get(sessionId);
+
+    if (!session) {
+      return new Response(
+        JSON.stringify({ error: `Session not found: ${sessionId}. Chunks may have expired.` }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
 
     console.log(`Finalizing upload for ${fileName}, assembling ${totalChunks} chunks...`);
 
     // Check if all chunks exist
     for (let i = 0; i < totalChunks; i++) {
-      const chunkPath = path.join(sessionDir, `chunk-${i}`);
-      if (!fs.existsSync(chunkPath)) {
+      if (!session.chunks.has(i)) {
         return new Response(
-          JSON.stringify({ error: `Missing chunk ${i}` }),
+          JSON.stringify({ error: `Missing chunk ${i} (received ${session.chunks.size}/${totalChunks})` }),
           { status: 400, headers: { 'Content-Type': 'application/json' } }
         );
       }
@@ -45,8 +55,7 @@ export async function POST(request) {
     // Merge chunks into single buffer
     const chunks = [];
     for (let i = 0; i < totalChunks; i++) {
-      const chunkPath = path.join(sessionDir, `chunk-${i}`);
-      const buffer = fs.readFileSync(chunkPath);
+      const buffer = session.chunks.get(i);
       chunks.push(buffer);
     }
 
@@ -70,13 +79,9 @@ export async function POST(request) {
       size: mergedBuffer.length,
     });
 
-    // Clean up temporary files
-    try {
-      fs.rmSync(sessionDir, { recursive: true, force: true });
-      console.log(`Cleaned up temporary files for ${sessionId}`);
-    } catch (cleanupErr) {
-      console.warn('Warning: Could not clean up temporary files:', cleanupErr.message);
-    }
+    // Clean up session from memory
+    storage.delete(sessionId);
+    console.log(`Cleaned up session: ${sessionId}`);
 
     return new Response(
       JSON.stringify({
