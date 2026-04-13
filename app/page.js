@@ -819,25 +819,23 @@ export default function Page() {
   async function handleUnlockAudio() {
     try {
       const wasAlreadyReady = audioReady;
+      const shouldEnableBackground = Boolean(backgroundMeta);
       
-      // Cukup set audioReady = true
-      // Ini akan trigger effect yang watch audioReady
-      // Effect tersebut akan call resumeBackground() jika backsound sudah ter-upload
       setAudioReady(true);
-      
-      // Jika audio sudah pernah unlock sebelumnya (resume after stop), aktifkan kembali background
-      if (wasAlreadyReady && !backgroundEnabled && backgroundMeta) {
+      if (shouldEnableBackground) {
         setBackgroundEnabled(true);
-        pushStatus('Audio dilanjutkan. Backsound kembali aktif.', 'success');
+      }
+      
+      if (shouldEnableBackground) {
+        pushStatus('Audio diaktifkan. Backsound kembali aktif.', 'success');
       } else if (!wasAlreadyReady) {
         pushStatus('Audio berhasil diaktifkan. Sistem siap memutar backsound dan announcement.', 'success');
       }
       
-      // Immediate trigger resume background jika conditions met
       await new Promise(resolve => setTimeout(resolve, 0));
       
       const bg = backgroundAudioRef.current;
-      const shouldPlay = bg && backgroundUrl && (backgroundEnabled || (wasAlreadyReady && backgroundMeta)) && !prayerState.active && !activeAnnouncementId && !pendingQueue.length;
+      const shouldPlay = bg && backgroundUrl && shouldEnableBackground && !prayerState.active && !activeAnnouncementId && !pendingQueue.length;
       
       if (shouldPlay) {
         try {
