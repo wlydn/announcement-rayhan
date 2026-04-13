@@ -391,6 +391,15 @@ export default function Page() {
 
     // Get audio URL directly from metadata (no file loading needed)
     const audioUrl = await getAudioFileUrl(item.blobId, item.fileUrl);
+    
+    console.log('playAnnouncementNow - URL Check:', {
+      itemId: item.id,
+      itemTitle: item.title,
+      blobId: item.blobId,
+      inputUrl: item.fileUrl,
+      resolvedUrl: audioUrl,
+    });
+    
     if (!audioUrl) {
       pushStatus(`File untuk announcement "${item.title}" tidak ditemukan. Upload ulang file-nya.`, 'error');
       return;
@@ -402,9 +411,18 @@ export default function Page() {
     pauseBackground();
 
     audio.pause();
-    audio.src = audioUrl;
     audio.currentTime = 0;
     audio.volume = announcementVolume;
+    
+    // Set src with better error handling
+    try {
+      audio.src = audioUrl;
+      audio.crossOrigin = 'anonymous';
+    } catch (e) {
+      console.error('Failed to set audio src:', e);
+      pushStatus(`Gagal memuat audio: ${e.message}`, 'error');
+      return;
+    }
 
     setActiveAnnouncementId(item.id);
     const played = await safelyPlay(audio);
@@ -842,8 +860,20 @@ export default function Page() {
       // Upload to Vercel Blob
       const blobData = await uploadAudioFile(file);
 
-      if (backgroundMeta?.blobId) {
-        await deleteAudioFile(backgroundMeta.blobId).catch(() => undefined);
+      // Delete old backsound if exists
+      if (backgroundMeta?.blobId || backgroundMeta?.fileUrl) {
+        console.log('Deleting old backsound from Vercel Blob:', {
+          blobId: backgroundMeta.blobId,
+          fileUrl: backgroundMeta.fileUrl,
+        });
+        deleteAudioFile(backgroundMeta.blobId, backgroundMeta.fileUrl)
+          .then(() => {
+            console.log('Old backsound successfully deleted:', backgroundMeta.blobId);
+          })
+          .catch((error) => {
+            console.warn('Failed to delete old backsound:', error);
+            // Don't fail the operation, just warn
+          });
       }
 
       const meta = {
@@ -930,19 +960,40 @@ export default function Page() {
   }
 
   async function handleDeleteAnnouncement(item) {
-    const updated = announcements.filter((entry) => entry.id !== item.id);
-    setAnnouncements(updated);
-    persistAnnouncements(updated);
+    try {
+      const updated = announcements.filter((entry) => entry.id !== item.id);
+      setAnnouncements(updated);
+      persistAnnouncements(updated);
 
-    const queueUpdated = pendingQueue.filter((id) => id !== item.id);
-    setPendingQueue(queueUpdated);
-    persistPendingQueue(queueUpdated);
+      const queueUpdated = pendingQueue.filter((id) => id !== item.id);
+      setPendingQueue(queueUpdated);
+      persistPendingQueue(queueUpdated);
 
-    // Delete from Vercel Blob
-    if (item.blobId) {
-      await deleteAudioFile(item.blobId).catch(() => undefined);
+      // Delete from Vercel Blob - async but don't block UI
+      if (item.blobId || item.fileUrl) {
+        console.log('Deleting announcement from Vercel Blob:', {
+          id: item.id,
+          title: item.title,
+          blobId: item.blobId,
+          fileUrl: item.fileUrl,
+        });
+
+        deleteAudioFile(item.blobId, item.fileUrl)
+          .then(() => {
+            console.log('Successfully deleted from Vercel Blob:', item.blobId);
+            pushStatus(`File announcement "${item.title}" berhasil dihapus dari cloud storage.`, 'success');
+          })
+          .catch((error) => {
+            console.error('Failed to delete from Vercel Blob:', error);
+            pushStatus(`Announcement dihapus dari app, tapi gagal hapus dari cloud: ${error.message}`, 'warning');
+          });
+      }
+
+      pushStatus(`Announcement "${item.title}" berhasil dihapus.`, 'success');
+    } catch (error) {
+      console.error('Error deleting announcement:', error);
+      pushStatus(`Gagal menghapus announcement: ${error.message}`, 'error');
     }
-    pushStatus(`Announcement ${item.title} dihapus.`, 'success');
   }
 
   function handleToggleAnnouncement(id) {
