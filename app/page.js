@@ -1010,6 +1010,45 @@ export default function Page() {
     persistPrayerConfig(updated);
   }
 
+  function handleAnnouncementError(error) {
+    console.error('Announcement audio error:', error);
+    const audioEl = announcementAudioRef.current;
+    if (audioEl) {
+      const errorMsg = getAudioErrorMessage(audioEl.error);
+      console.error('Audio error details:', errorMsg);
+      
+      // Auto-skip to next announcement on error
+      setActiveAnnouncementId(null);
+      const updatedQueue = pendingQueue.slice(1);
+      setPendingQueue(updatedQueue);
+      persistPendingQueue(updatedQueue);
+      
+      pushStatus(`Gagal memutar announcement (${errorMsg}). Lanjut ke announcement berikutnya...`, 'error');
+      processQueueIfPossible();
+    }
+  }
+
+  function handleBackgroundError(error) {
+    console.error('Background audio error:', error);
+    const audioEl = backgroundAudioRef.current;
+    if (audioEl && audioEl.error) {
+      const errorMsg = getAudioErrorMessage(audioEl.error);
+      console.error('Audio error details:', errorMsg);
+      pushStatus(`Error backsound: ${errorMsg}. Coba aktifkan kembali audio.`, 'warning');
+    }
+  }
+
+  function getAudioErrorMessage(error) {
+    if (!error) return 'Unknown error';
+    switch (error.code) {
+      case error.MEDIA_ERR_ABORTED: return 'Playback dibatalkan';
+      case error.MEDIA_ERR_NETWORK: return 'Network error - periksa URL atau koneksi internet';
+      case error.MEDIA_ERR_DECODE: return 'Audio file corrupt atau format tidak didukung';
+      case error.MEDIA_ERR_SRC_NOT_SUPPORTED: return 'Format audio tidak didukung browser';
+      default: return `Audio error code ${error.code}`;
+    }
+  }
+
   async function handleAnnouncementEnded() {
     setActiveAnnouncementId(null);
 
@@ -1072,8 +1111,8 @@ export default function Page() {
   if (!bootstrapped) {
     return (
       <main className="page-shell">
-        <audio ref={backgroundAudioRef} src={backgroundUrl || undefined} preload="auto" loop crossOrigin="anonymous" />
-        <audio ref={announcementAudioRef} preload="auto" onEnded={handleAnnouncementEnded} crossOrigin="anonymous" />
+        <audio ref={backgroundAudioRef} src={backgroundUrl || undefined} preload="auto" loop crossOrigin="anonymous" onError={handleBackgroundError} />
+        <audio ref={announcementAudioRef} preload="auto" onEnded={handleAnnouncementEnded} onError={handleAnnouncementError} crossOrigin="anonymous" />
         <div style={{ padding: '2rem', textAlign: 'center' }}>
           <p>Memuat aplikasi...</p>
         </div>
@@ -1083,8 +1122,8 @@ export default function Page() {
 
   return (
     <main className="page-shell">
-      <audio ref={backgroundAudioRef} src={backgroundUrl || undefined} preload="auto" loop crossOrigin="anonymous" />
-      <audio ref={announcementAudioRef} preload="auto" onEnded={handleAnnouncementEnded} crossOrigin="anonymous" />
+      <audio ref={backgroundAudioRef} src={backgroundUrl || undefined} preload="auto" loop crossOrigin="anonymous" onError={handleBackgroundError} />
+      <audio ref={announcementAudioRef} preload="auto" onEnded={handleAnnouncementEnded} onError={handleAnnouncementError} crossOrigin="anonymous" />
 
       <section className="hero-card">
         <div>
