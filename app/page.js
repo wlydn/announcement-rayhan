@@ -226,6 +226,7 @@ export default function Page() {
   const backgroundAudioRef = useRef(null);
   const announcementAudioRef = useRef(null);
   const pendingPlayAfterUnlockRef = useRef(false);
+  const isStoppingRef = useRef(false); // Track if we're intentionally stopping audio
   const lastTickMinuteRef = useRef('');
   const objectUrlsRef = useRef([]);
   const attemptedInitialLocationRef = useRef(false);
@@ -1068,12 +1069,18 @@ export default function Page() {
   }
 
   function handleAnnouncementError(error) {
+    // Skip error if we're intentionally stopping
+    if (isStoppingRef.current) {
+      console.debug('Skipping announcement error - audio is being stopped');
+      return;
+    }
+    
     console.error('Announcement audio error:', error);
     const audioEl = announcementAudioRef.current;
     
-    // Don't show error if src is intentionally cleared (e.g., during stop)
+    // Don't show error if src is not set (intentionally cleared)
     if (!audioEl || !audioEl.src) {
-      console.debug('Skipping announcement error - src is empty or element missing');
+      console.debug('Skipping announcement error - src is empty');
       return;
     }
     
@@ -1093,12 +1100,18 @@ export default function Page() {
   }
 
   function handleBackgroundError(error) {
+    // Skip error if we're intentionally stopping
+    if (isStoppingRef.current) {
+      console.debug('Skipping background error - audio is being stopped');
+      return;
+    }
+    
     console.error('Background audio error:', error);
     const audioEl = backgroundAudioRef.current;
     
-    // Don't show error if src is not set or element missing
+    // Don't show error if src is not set (intentionally cleared)
     if (!audioEl || !audioEl.src) {
-      console.debug('Skipping background error - src is empty or element missing');
+      console.debug('Skipping background error - src is empty');
       return;
     }
     
@@ -1144,28 +1157,40 @@ export default function Page() {
   }
 
   async function handleStopAll() {
-    const bg = backgroundAudioRef.current;
-    const an = announcementAudioRef.current;
+    try {
+      // Set flag to suppress error events during stopping
+      isStoppingRef.current = true;
+      
+      const bg = backgroundAudioRef.current;
+      const an = announcementAudioRef.current;
 
-    if (bg) {
-      bg.pause();
-      bg.currentTime = 0;
-      // Clear src to prevent error events on stale data
-      bg.src = '';
+      if (bg) {
+        bg.pause();
+        bg.currentTime = 0;
+        bg.src = '';
+      }
+
+      if (an) {
+        an.pause();
+        an.currentTime = 0;
+        an.src = '';
+      }
+
+      setActiveAnnouncementId(null);
+      setBackgroundEnabled(false);
+      setPendingQueue([]);
+      persistPendingQueue([]);
+      pushStatus('Semua audio dihentikan.', 'info');
+
+      // Give error events time to fire and be caught by the suppression flag
+      // Then clear the flag
+      setTimeout(() => {
+        isStoppingRef.current = false;
+      }, 100);
+    } catch (error) {
+      console.error('Error in handleStopAll:', error);
+      isStoppingRef.current = false;
     }
-
-    if (an) {
-      an.pause();
-      an.currentTime = 0;
-      // Clear src to prevent error events on stale data
-      an.src = '';
-    }
-
-    setActiveAnnouncementId(null);
-    setBackgroundEnabled(false);
-    setPendingQueue([]);
-    persistPendingQueue([]);
-    pushStatus('Semua audio dihentikan.', 'info');
   }
 
   const nextPrayerLabel = prayerState.active
