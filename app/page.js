@@ -668,6 +668,12 @@ export default function Page() {
   }, [backgroundVolume]);
 
   useEffect(() => {
+    const announcement = announcementAudioRef.current;
+    if (!announcement) return;
+    announcement.volume = announcementVolume;
+  }, [announcementVolume]);
+
+  useEffect(() => {
     // Sinkronisasi src audio element dengan backgroundUrl
     const audioEl = backgroundAudioRef.current;
     if (audioEl && backgroundUrl) {
