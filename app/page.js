@@ -181,16 +181,6 @@ function hydrateAnnouncements(items, previousItems = []) {
   }));
 }
 
-function formatDuration(seconds) {
-  const safe = Math.max(0, seconds);
-  const hours = Math.floor(safe / 3600);
-  const minutes = Math.floor((safe % 3600) / 60);
-  const secs = safe % 60;
-
-  if (hours > 0) return `${pad(hours)}:${pad(minutes)}:${pad(secs)}`;
-  return `${pad(minutes)}:${pad(secs)}`;
-}
-
 function formatOffsetLabel(value) {
   const number = Number(value || 0);
   if (number === 0) return '0 menit';
@@ -421,9 +411,14 @@ export default function Page() {
     const nextId = pendingQueue[0];
     const item = announcements.find((entry) => entry.id === nextId);
 
-    if (!item) {
+    if (!item || !item.enabled) {
       const updated = pendingQueue.slice(1);
       setPendingQueue(updated);
+      if (updated.length) {
+        await processQueueIfPossible();
+      } else {
+        await resumeBackground('Backsound standby aktif.');
+      }
       return;
     }
 
@@ -678,12 +673,6 @@ export default function Page() {
     if (!bg) return;
     bg.volume = backgroundVolume;
   }, [backgroundVolume]);
-
-  useEffect(() => {
-    const announcement = announcementAudioRef.current;
-    if (!announcement) return;
-    announcement.volume = announcementVolume;
-  }, [announcementVolume]);
 
   useEffect(() => {
     // Sinkronisasi src audio element dengan backgroundUrl
@@ -1033,18 +1022,57 @@ export default function Page() {
     }
   }
 
-  function handleToggleAnnouncement(id) {
-    toggleSharedAnnouncement(id)
-      .then((sharedAudioConfig) => {
-        setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
-      })
-      .catch((error) => {
-        console.error('Error toggling announcement:', error);
-        pushStatus(`Gagal mengubah status announcement: ${error.message}`, 'error');
-      });
+  async function handleToggleAnnouncement(id) {
+    const currentItem = announcements.find((item) => item.id === id);
+    if (!currentItem) return;
+
+    const nextEnabled = !currentItem.enabled;
+
+    setAnnouncements((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, enabled: nextEnabled } : item))
+    );
+
+    if (!nextEnabled) {
+      setPendingQueue((prev) => prev.filter((queueId) => queueId !== id));
+
+      if (activeAnnouncementId === id) {
+        const audio = announcementAudioRef.current;
+        if (audio) {
+          audio.pause();
+          audio.currentTime = 0;
+          audio.src = '';
+        }
+        setActiveAnnouncementId(null);
+      }
+    }
+
+    try {
+      const sharedAudioConfig = await toggleSharedAnnouncement(id);
+      setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
+
+      if (!nextEnabled) {
+        pushStatus(`Announcement "${currentItem.title}" dinonaktifkan.`, 'info');
+        await processQueueIfPossible();
+      } else {
+        pushStatus(`Announcement "${currentItem.title}" diaktifkan kembali.`, 'success');
+      }
+    } catch (error) {
+      console.error('Error toggling announcement:', error);
+
+      setAnnouncements((prev) =>
+        prev.map((item) => (item.id === id ? { ...item, enabled: currentItem.enabled } : item))
+      );
+
+      pushStatus(`Gagal mengubah status announcement: ${error.message}`, 'error');
+    }
   }
 
   async function handlePlayManual(item) {
+    if (!item.enabled) {
+      pushStatus(`Announcement "${item.title}" sedang Off. Aktifkan dulu jika ingin diputar.`, 'warning');
+      return;
+    }
+
     const existsInQueue = pendingQueue.includes(item.id);
     if (!existsInQueue) {
       const updatedQueue = [item.id, ...pendingQueue];
@@ -1086,12 +1114,6 @@ export default function Page() {
     setPrayerConfig(updated);
     persistPrayerConfig(updated);
     pushStatus(mode === 'auto' ? 'Mode jadwal sholat diubah ke otomatis API.' : 'Mode jadwal sholat diubah ke manual.', 'info');
-  }
-
-  function handlePrayerMethodChange(value) {
-    const updated = { ...prayerConfig, method: Number(value) };
-    setPrayerConfig(updated);
-    persistPrayerConfig(updated);
   }
 
   function handleCoordinateChange(field, value) {
@@ -1221,14 +1243,6 @@ export default function Page() {
       isStoppingRef.current = false;
     }
   }
-
-  const nextPrayerLabel = prayerState.active
-    ? `${toPrayerLabel(prayerState.prayerName)} sedang berlangsung`
-    : 'Tidak ada jeda sholat saat ini';
-
-  const remainingPrayerSeconds = prayerState.active
-    ? Math.max(0, (prayerState.end - (now.getHours() * 60 + now.getMinutes())) * 60 - now.getSeconds())
-    : 0;
 
   const prayerSourceSummary = prayerConfig.mode === 'auto'
     ? prayerApiCache.fetchedAt
