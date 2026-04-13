@@ -841,6 +841,10 @@ export default function Page() {
       
       if (shouldPlay) {
         try {
+          if (!bg.src || bg.src !== backgroundUrl) {
+            bg.src = backgroundUrl;
+            bg.load();
+          }
           bg.volume = backgroundVolume;
           bg.loop = true;
           await bg.play();
@@ -1219,7 +1223,6 @@ export default function Page() {
       if (bg) {
         bg.pause();
         bg.currentTime = 0;
-        bg.src = '';
       }
 
       if (an) {
@@ -1230,6 +1233,7 @@ export default function Page() {
 
       setActiveAnnouncementId(null);
       setBackgroundEnabled(false);
+      setAudioReady(false);
       setPendingQueue([]);
       pushStatus('Semua audio dihentikan.', 'info');
 
