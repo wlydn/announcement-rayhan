@@ -1,6 +1,8 @@
 import { put, del } from '@vercel/blob';
 import { randomBytes } from 'crypto';
 
+export const maxDuration = 60; // Increase timeout to 60 seconds for large file uploads
+
 function generateId() {
   return `${Date.now()}-${randomBytes(3).toString('hex')}`;
 }
