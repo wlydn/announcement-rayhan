@@ -1070,7 +1070,14 @@ export default function Page() {
   function handleAnnouncementError(error) {
     console.error('Announcement audio error:', error);
     const audioEl = announcementAudioRef.current;
-    if (audioEl) {
+    
+    // Don't show error if src is intentionally cleared (e.g., during stop)
+    if (!audioEl || !audioEl.src) {
+      console.debug('Skipping announcement error - src is empty or element missing');
+      return;
+    }
+    
+    if (audioEl && audioEl.error) {
       const errorMsg = getAudioErrorMessage(audioEl.error);
       console.error('Audio error details:', errorMsg);
       
@@ -1088,6 +1095,13 @@ export default function Page() {
   function handleBackgroundError(error) {
     console.error('Background audio error:', error);
     const audioEl = backgroundAudioRef.current;
+    
+    // Don't show error if src is not set or element missing
+    if (!audioEl || !audioEl.src) {
+      console.debug('Skipping background error - src is empty or element missing');
+      return;
+    }
+    
     if (audioEl && audioEl.error) {
       const errorMsg = getAudioErrorMessage(audioEl.error);
       console.error('Audio error details:', errorMsg);
@@ -1136,11 +1150,14 @@ export default function Page() {
     if (bg) {
       bg.pause();
       bg.currentTime = 0;
+      // Clear src to prevent error events on stale data
+      bg.src = '';
     }
 
     if (an) {
       an.pause();
       an.currentTime = 0;
+      // Clear src to prevent error events on stale data
       an.src = '';
     }
 
