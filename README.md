@@ -15,7 +15,8 @@ Website Next.js untuk:
 - Next.js 15
 - React 18
 - **Penyimpanan file audio di Vercel Blob Storage** (cloud-based)
-- Konfigurasi jadwal disimpan di localStorage
+- Metadata audio bersama disimpan di Vercel Blob agar bisa dibuka dari browser/perangkat lain
+- Konfigurasi jadwal sholat dan preferensi lokal disimpan di localStorage
 - Pengambilan jadwal sholat melalui API AlAdhan dari sisi client
 - API Routes untuk token upload Blob dan delete audio files
 
@@ -64,8 +65,8 @@ Buka `http://localhost:3000`
 ## Catatan penting
 - Jika izin lokasi browser ditolak, Anda tetap bisa isi `latitude` dan `longitude` manual.
 - Jika ingin sepenuhnya manual, ubah mode ke **Manual** lalu isi jam sholat langsung.
-- File audio disimpan di Vercel Blob, sedangkan metadata jadwal tetap ada di `localStorage` browser.
-- Jika dibuka di perangkat lain, file audio tetap ada di Blob tetapi jadwal dan metadata lokal perlu diatur ulang atau disinkronkan lewat backend.
+- File audio disimpan di Vercel Blob. Metadata audio utama dibaca dari shared storage, sedangkan jadwal sholat dan preferensi lokal tetap ada di `localStorage` browser.
+- Jika dibuka di perangkat lain, backsound aktif dan daftar announcement tetap ikut termuat, tetapi pengaturan lokal seperti volume, unlock audio, dan jadwal sholat lokal tetap mengikuti browser tersebut.
 - Browser modern membatasi autoplay. Tombol **Aktifkan Audio** memang wajib diklik sekali setelah halaman dibuka.
 
 ## Struktur singkat

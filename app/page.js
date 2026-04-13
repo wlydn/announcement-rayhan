@@ -2,6 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { uploadAudioFile, deleteAudioFile, getAudioFileUrl } from '../lib/blob';
+import {
+  addSharedAnnouncement,
+  deleteSharedAnnouncement,
+  getSharedAudioConfig,
+  setSharedBackground,
+  toggleSharedAnnouncement,
+} from '../lib/audio-config';
 
 const DEFAULT_PRAYER_TIMES = {
   subuh: '04:30',
@@ -43,10 +50,7 @@ const STORAGE_KEYS = {
   prayerOffsets: 'app-prayer-offsets-v2',
   prayerConfig: 'app-prayer-config-v2',
   prayerApiCache: 'app-prayer-api-cache-v2',
-  announcements: 'app-announcements-v1',
-  backgroundMeta: 'app-background-meta-v1',
   settings: 'app-settings-v1',
-  pendingQueue: 'app-pending-queue-v1',
   backgroundSchedule: 'app-background-schedule-v1',
 };
 
@@ -163,6 +167,15 @@ function createId(prefix = 'id') {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function hydrateAnnouncements(items, previousItems = []) {
+  const lastTriggeredDateById = new Map(previousItems.map((item) => [item.id, item.lastTriggeredDate || '']));
+
+  return items.map((item) => ({
+    ...item,
+    lastTriggeredDate: lastTriggeredDateById.get(item.id) || '',
+  }));
+}
+
 function formatDuration(seconds) {
   const safe = Math.max(0, seconds);
   const hours = Math.floor(safe / 3600);
@@ -228,7 +241,6 @@ export default function Page() {
   const pendingPlayAfterUnlockRef = useRef(false);
   const isStoppingRef = useRef(false); // Track if we're intentionally stopping audio
   const lastTickMinuteRef = useRef('');
-  const objectUrlsRef = useRef([]);
   const attemptedInitialLocationRef = useRef(false);
 
   const todayKey = useMemo(() => formatDateKey(now), [now]);
@@ -262,17 +274,6 @@ export default function Page() {
     setStatus({ message, type });
   }
 
-  function createFileUrl(file) {
-    const url = URL.createObjectURL(file);
-    objectUrlsRef.current.push(url);
-    return url;
-  }
-
-  function revokeAllObjectUrls() {
-    objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-    objectUrlsRef.current = [];
-  }
-
   function persistManualPrayerTimes(value) {
     localStorage.setItem(STORAGE_KEYS.manualPrayerTimes, JSON.stringify(value));
   }
@@ -293,24 +294,8 @@ export default function Page() {
     localStorage.setItem(STORAGE_KEYS.prayerApiCache, JSON.stringify(value));
   }
 
-  function persistAnnouncements(value) {
-    localStorage.setItem(STORAGE_KEYS.announcements, JSON.stringify(value));
-  }
-
-  function persistBackgroundMeta(value) {
-    if (!value) {
-      localStorage.removeItem(STORAGE_KEYS.backgroundMeta);
-      return;
-    }
-    localStorage.setItem(STORAGE_KEYS.backgroundMeta, JSON.stringify(value));
-  }
-
   function persistSettings(value) {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(value));
-  }
-
-  function persistPendingQueue(value) {
-    localStorage.setItem(STORAGE_KEYS.pendingQueue, JSON.stringify(value));
   }
 
   function persistBackgroundSchedule(startTime, endTime) {
@@ -451,7 +436,6 @@ export default function Page() {
     if (!item) {
       const updated = pendingQueue.slice(1);
       setPendingQueue(updated);
-      persistPendingQueue(updated);
       return;
     }
 
@@ -582,47 +566,69 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
-    const savedManualPrayerTimes = localStorage.getItem(STORAGE_KEYS.manualPrayerTimes);
-    const savedPrayerPauseMinutes = localStorage.getItem(STORAGE_KEYS.prayerPauseMinutes);
-    const savedPrayerOffsets = localStorage.getItem(STORAGE_KEYS.prayerOffsets);
-    const savedPrayerConfig = localStorage.getItem(STORAGE_KEYS.prayerConfig);
-    const savedPrayerApiCache = localStorage.getItem(STORAGE_KEYS.prayerApiCache);
-    const savedAnnouncements = localStorage.getItem(STORAGE_KEYS.announcements);
-    const savedBackgroundMeta = localStorage.getItem(STORAGE_KEYS.backgroundMeta);
-    const savedSettings = localStorage.getItem(STORAGE_KEYS.settings);
-    const savedPendingQueue = localStorage.getItem(STORAGE_KEYS.pendingQueue);
+    let cancelled = false;
 
-    if (savedManualPrayerTimes) setManualPrayerTimes(JSON.parse(savedManualPrayerTimes));
-    if (savedPrayerPauseMinutes) setPrayerPauseMinutes(Number(savedPrayerPauseMinutes));
-    if (savedPrayerOffsets) setPrayerOffsets({ ...DEFAULT_PRAYER_OFFSETS, ...JSON.parse(savedPrayerOffsets) });
-    
-    if (savedPrayerConfig) {
-      const parsed = JSON.parse(savedPrayerConfig);
-      // Validasi koordinat dari localStorage
-      const lat = Number(parsed.latitude);
-      const lng = Number(parsed.longitude);
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-        // Jika koordinat invalid, reset ke default
-        parsed.latitude = '';
-        parsed.longitude = '';
+    async function bootstrapPage() {
+      const savedManualPrayerTimes = localStorage.getItem(STORAGE_KEYS.manualPrayerTimes);
+      const savedPrayerPauseMinutes = localStorage.getItem(STORAGE_KEYS.prayerPauseMinutes);
+      const savedPrayerOffsets = localStorage.getItem(STORAGE_KEYS.prayerOffsets);
+      const savedPrayerConfig = localStorage.getItem(STORAGE_KEYS.prayerConfig);
+      const savedPrayerApiCache = localStorage.getItem(STORAGE_KEYS.prayerApiCache);
+      const savedSettings = localStorage.getItem(STORAGE_KEYS.settings);
+
+      if (savedManualPrayerTimes) setManualPrayerTimes(JSON.parse(savedManualPrayerTimes));
+      if (savedPrayerPauseMinutes) setPrayerPauseMinutes(Number(savedPrayerPauseMinutes));
+      if (savedPrayerOffsets) setPrayerOffsets({ ...DEFAULT_PRAYER_OFFSETS, ...JSON.parse(savedPrayerOffsets) });
+
+      if (savedPrayerConfig) {
+        const parsed = JSON.parse(savedPrayerConfig);
+        const lat = Number(parsed.latitude);
+        const lng = Number(parsed.longitude);
+
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+          parsed.latitude = '';
+          parsed.longitude = '';
+        }
+
+        setPrayerConfig({ ...DEFAULT_PRAYER_CONFIG, ...parsed });
       }
-      setPrayerConfig({ ...DEFAULT_PRAYER_CONFIG, ...parsed });
-    }
-    
-    if (savedPrayerApiCache) setPrayerApiCache({ ...DEFAULT_PRAYER_API_CACHE, ...JSON.parse(savedPrayerApiCache) });
-    if (savedAnnouncements) setAnnouncements(JSON.parse(savedAnnouncements));
-    if (savedBackgroundMeta) setBackgroundMeta(JSON.parse(savedBackgroundMeta));
-    if (savedPendingQueue) setPendingQueue(JSON.parse(savedPendingQueue));
 
-    if (savedSettings) {
-      const parsed = JSON.parse(savedSettings);
-      if (typeof parsed.backgroundEnabled === 'boolean') setBackgroundEnabled(parsed.backgroundEnabled);
-      if (typeof parsed.backgroundVolume === 'number') setBackgroundVolume(parsed.backgroundVolume);
-      if (typeof parsed.announcementVolume === 'number') setAnnouncementVolume(parsed.announcementVolume);
+      if (savedPrayerApiCache) {
+        setPrayerApiCache({ ...DEFAULT_PRAYER_API_CACHE, ...JSON.parse(savedPrayerApiCache) });
+      }
+
+      if (savedSettings) {
+        const parsed = JSON.parse(savedSettings);
+        if (typeof parsed.backgroundEnabled === 'boolean') setBackgroundEnabled(parsed.backgroundEnabled);
+        if (typeof parsed.backgroundVolume === 'number') setBackgroundVolume(parsed.backgroundVolume);
+        if (typeof parsed.announcementVolume === 'number') setAnnouncementVolume(parsed.announcementVolume);
+      }
+
+      loadBackgroundSchedule();
+
+      try {
+        const sharedAudioConfig = await getSharedAudioConfig();
+        if (cancelled) return;
+
+        setBackgroundMeta(sharedAudioConfig.background);
+        setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
+      } catch (error) {
+        console.error('Failed to load shared audio config:', error);
+        if (!cancelled) {
+          pushStatus(`Gagal memuat data audio bersama: ${error.message}`, 'warning');
+        }
+      } finally {
+        if (!cancelled) {
+          setBootstrapped(true);
+        }
+      }
     }
 
-    loadBackgroundSchedule();
-    setBootstrapped(true);
+    bootstrapPage();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -750,14 +756,12 @@ export default function Page() {
     );
 
     setAnnouncements(updatedAnnouncements);
-    persistAnnouncements(updatedAnnouncements);
 
     const nextQueue = [...pendingQueue];
     dueItems.forEach((item) => {
       if (!nextQueue.includes(item.id)) nextQueue.push(item.id);
     });
     setPendingQueue(nextQueue);
-    persistPendingQueue(nextQueue);
 
     if (prayerState.active) {
       pushStatus(
@@ -861,27 +865,12 @@ export default function Page() {
     const file = event.target.files?.[0];
     if (!file) return;
 
+    let blobData = null;
+
     try {
       pushStatus('Mengunggah backsound ke Vercel Blob...', 'info');
       
-      // Upload to Vercel Blob
-      const blobData = await uploadAudioFile(file);
-
-      // Delete old backsound if exists
-      if (backgroundMeta?.blobId || backgroundMeta?.fileUrl) {
-        console.log('Deleting old backsound from Vercel Blob:', {
-          blobId: backgroundMeta.blobId,
-          fileUrl: backgroundMeta.fileUrl,
-        });
-        deleteAudioFile(backgroundMeta.blobId, backgroundMeta.fileUrl)
-          .then(() => {
-            console.log('Old backsound successfully deleted:', backgroundMeta.blobId);
-          })
-          .catch((error) => {
-            console.warn('Failed to delete old backsound:', error);
-            // Don't fail the operation, just warn
-          });
-      }
+      blobData = await uploadAudioFile(file);
 
       const meta = {
         blobId: blobData.blobId,
@@ -890,12 +879,35 @@ export default function Page() {
         uploadedAt: Date.now(),
       };
 
-      setBackgroundMeta(meta);
-      persistBackgroundMeta(meta);
+      const sharedAudioConfig = await setSharedBackground(meta);
+      setBackgroundMeta(sharedAudioConfig.background);
+
+      if (sharedAudioConfig.previousBackground?.blobId || sharedAudioConfig.previousBackground?.fileUrl) {
+        console.log('Deleting old backsound from Vercel Blob:', {
+          blobId: sharedAudioConfig.previousBackground.blobId,
+          fileUrl: sharedAudioConfig.previousBackground.fileUrl,
+        });
+
+        deleteAudioFile(sharedAudioConfig.previousBackground.blobId, sharedAudioConfig.previousBackground.fileUrl)
+          .then(() => {
+            console.log('Old backsound successfully deleted:', sharedAudioConfig.previousBackground.blobId);
+          })
+          .catch((deleteError) => {
+            console.warn('Failed to delete old backsound:', deleteError);
+          });
+      }
+
       pushStatus(`Backsound standby disimpan di Vercel Blob: ${file.name}`, 'success');
       event.target.value = '';
     } catch (error) {
       console.error('Error uploading background:', error);
+
+      if (blobData?.blobId || blobData?.url) {
+        deleteAudioFile(blobData.blobId, blobData.url).catch((cleanupError) => {
+          console.warn('Failed to clean up uploaded backsound after metadata error:', cleanupError);
+        });
+      }
+
       pushStatus(`Gagal mengunggah backsound: ${error.message}`, 'error');
     }
   }
@@ -925,12 +937,12 @@ export default function Page() {
     }
 
     setIsSavingAnnouncement(true);
+    let blobData = null;
 
     try {
       pushStatus('Mengunggah announcement ke Vercel Blob...', 'info');
       
-      // Upload to Vercel Blob
-      const blobData = await uploadAudioFile(file);
+      blobData = await uploadAudioFile(file);
 
       const item = {
         id: createId('schedule'),
@@ -938,15 +950,12 @@ export default function Page() {
         time: newAnnouncementTime,
         blobId: blobData.blobId,
         fileUrl: blobData.url,
-        fileName: file.name,
         enabled: true,
         createdAt: Date.now(),
-        lastTriggeredDate: '',
       };
 
-      const updated = [...announcements, item].sort((a, b) => timeToMinutes(a.time) - timeToMinutes(b.time));
-      setAnnouncements(updated);
-      persistAnnouncements(updated);
+      const sharedAudioConfig = await addSharedAnnouncement(item);
+      setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
 
       setNewAnnouncementTitle('');
       setNewAnnouncementTime('08:00');
@@ -960,6 +969,13 @@ export default function Page() {
       pushStatus(`Announcement ${item.title} jam ${item.time} berhasil ditambahkan.`, 'success');
     } catch (error) {
       console.error(error);
+
+      if (blobData?.blobId || blobData?.url) {
+        deleteAudioFile(blobData.blobId, blobData.url).catch((cleanupError) => {
+          console.warn('Failed to clean up uploaded announcement after metadata error:', cleanupError);
+        });
+      }
+
       pushStatus(`Gagal menyimpan announcement: ${error.message}`, 'error');
     } finally {
       setIsSavingAnnouncement(false);
@@ -968,13 +984,11 @@ export default function Page() {
 
   async function handleDeleteAnnouncement(item) {
     try {
-      const updated = announcements.filter((entry) => entry.id !== item.id);
-      setAnnouncements(updated);
-      persistAnnouncements(updated);
+      const sharedAudioConfig = await deleteSharedAnnouncement(item.id);
+      setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
 
       const queueUpdated = pendingQueue.filter((id) => id !== item.id);
       setPendingQueue(queueUpdated);
-      persistPendingQueue(queueUpdated);
 
       // Delete from Vercel Blob - async but don't block UI
       if (item.blobId || item.fileUrl) {
@@ -1004,11 +1018,14 @@ export default function Page() {
   }
 
   function handleToggleAnnouncement(id) {
-    const updated = announcements.map((item) =>
-      item.id === id ? { ...item, enabled: !item.enabled } : item
-    );
-    setAnnouncements(updated);
-    persistAnnouncements(updated);
+    toggleSharedAnnouncement(id)
+      .then((sharedAudioConfig) => {
+        setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
+      })
+      .catch((error) => {
+        console.error('Error toggling announcement:', error);
+        pushStatus(`Gagal mengubah status announcement: ${error.message}`, 'error');
+      });
   }
 
   async function handlePlayManual(item) {
@@ -1016,7 +1033,6 @@ export default function Page() {
     if (!existsInQueue) {
       const updatedQueue = [item.id, ...pendingQueue];
       setPendingQueue(updatedQueue);
-      persistPendingQueue(updatedQueue);
     }
 
     if (prayerState.active) {
@@ -1092,7 +1108,6 @@ export default function Page() {
       setActiveAnnouncementId(null);
       const updatedQueue = pendingQueue.slice(1);
       setPendingQueue(updatedQueue);
-      persistPendingQueue(updatedQueue);
       
       pushStatus(`Gagal memutar announcement (${errorMsg}). Lanjut ke announcement berikutnya...`, 'error');
       processQueueIfPossible();
@@ -1138,7 +1153,6 @@ export default function Page() {
 
     const updatedQueue = pendingQueue.slice(1);
     setPendingQueue(updatedQueue);
-    persistPendingQueue(updatedQueue);
 
     if (prayerState.active) {
       pushStatus(`Announcement selesai. Backsound tetap dijeda karena waktu ${toPrayerLabel(prayerState.prayerName)} masih berjalan.`, 'warning');
@@ -1179,7 +1193,6 @@ export default function Page() {
       setActiveAnnouncementId(null);
       setBackgroundEnabled(false);
       setPendingQueue([]);
-      persistPendingQueue([]);
       pushStatus('Semua audio dihentikan.', 'info');
 
       // Give error events time to fire and be caught by the suppression flag
@@ -1641,4 +1654,3 @@ export default function Page() {
     </main>
   );
 }
-
