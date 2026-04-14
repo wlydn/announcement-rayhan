@@ -1,8 +1,10 @@
 import { handleUpload } from '@vercel/blob/client';
+import { NextResponse } from 'next/server';
+import { AUDIO_CONTENT_TYPES, MAX_AUDIO_SIZE } from '../../../../lib/audio-upload';
 
+export const runtime = 'nodejs';
 export const maxDuration = 60;
-
-const MAX_AUDIO_SIZE = 50 * 1024 * 1024; // 50MB total
+const CLIENT_TOKEN_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 function parseClientPayload(clientPayload) {
   if (!clientPayload) return null;
@@ -34,7 +36,7 @@ export async function POST(request) {
         const contentType = payload?.contentType;
         const fileSize = Number(payload?.fileSize || 0);
 
-        if (!contentType || !contentType.startsWith('audio/')) {
+        if (!contentType || !AUDIO_CONTENT_TYPES.includes(contentType)) {
           throw new Error('File harus berupa audio.');
         }
 
@@ -55,8 +57,9 @@ export async function POST(request) {
 
         return {
           maximumSizeInBytes: MAX_AUDIO_SIZE,
-          allowedContentTypes: [contentType],
+          allowedContentTypes: AUDIO_CONTENT_TYPES,
           addRandomSuffix: false,
+          validUntil: Date.now() + CLIENT_TOKEN_TTL_MS,
           tokenPayload: clientPayload,
         };
       },
@@ -72,35 +75,19 @@ export async function POST(request) {
       },
     });
 
-    return Response.json(jsonResponse, {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-      },
-    });
+    return NextResponse.json(jsonResponse);
   } catch (error) {
     console.error('Blob client upload route error:', error);
 
-    return Response.json(
+    return NextResponse.json(
       {
         error: error.message || 'Upload token generation failed.',
       },
-      {
-        status: 400,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-        },
-      }
+      { status: 400 }
     );
   }
 }
 
 export async function OPTIONS() {
-  return new Response(null, {
-    status: 200,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    },
-  });
+  return new NextResponse(null, { status: 200 });
 }
