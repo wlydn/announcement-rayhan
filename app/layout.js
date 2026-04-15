@@ -1,5 +1,5 @@
 export const metadata = {
-  title: 'Announcement & Prayer Pause Player',
+  title: 'IT Rayhan Hospital',
   description: 'Pemutar announcement dengan jadwal, backsound standby, dan jeda otomatis saat waktu sholat.',
 };
 

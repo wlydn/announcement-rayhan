@@ -5,8 +5,8 @@ export const maxDuration = 60;
 
 const CONFIG_PATH = 'config/audio-library.json';
 const DEFAULT_BACKGROUND_SCHEDULE = {
-  startTime: '00:00',
-  endTime: '23:59',
+  startTime: '06:00',
+  endTime: '17:45',
 };
 
 function createDefaultLibrary() {
@@ -45,6 +45,8 @@ function normalizeAnnouncement(announcement) {
     return null;
   }
 
+  const repeatCount = Math.max(1, Number.parseInt(announcement.repeatCount, 10) || 1);
+
   return {
     id: String(announcement.id),
     title: String(announcement.title).trim(),
@@ -52,6 +54,7 @@ function normalizeAnnouncement(announcement) {
     blobId: String(announcement.blobId),
     fileUrl: String(announcement.fileUrl),
     enabled: announcement.enabled !== false,
+    repeatCount,
     createdAt: Number(announcement.createdAt || Date.now()),
   };
 }

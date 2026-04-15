@@ -156,6 +156,24 @@ function isNowInsideBackgroundWindow(startTime, endTime, now = new Date()) {
   }
 }
 
+function getBackgroundSchedulePhase(startTime, endTime, now = new Date()) {
+  const minutesNow = now.getHours() * 60 + now.getMinutes();
+  const start = timeToMinutes(startTime);
+  const end = timeToMinutes(endTime);
+
+  if (start <= end) {
+    if (minutesNow < start) return 'before_start';
+    if (minutesNow >= end) return 'after_end';
+    return 'active';
+  }
+
+  if (minutesNow >= start || minutesNow < end) {
+    return 'active';
+  }
+
+  return 'after_end';
+}
+
 function toPrayerLabel(key) {
   return (
     {
@@ -177,6 +195,7 @@ function hydrateAnnouncements(items, previousItems = []) {
 
   return items.map((item) => ({
     ...item,
+    repeatCount: Math.max(1, Number.parseInt(item.repeatCount, 10) || 1),
     lastTriggeredDate: lastTriggeredDateById.get(item.id) || '',
   }));
 }
@@ -225,6 +244,7 @@ export default function Page() {
 
   const [newAnnouncementTitle, setNewAnnouncementTitle] = useState('');
   const [newAnnouncementTime, setNewAnnouncementTime] = useState('08:00');
+  const [newAnnouncementRepeatCount, setNewAnnouncementRepeatCount] = useState(1);
   const [newAnnouncementFileName, setNewAnnouncementFileName] = useState('');
   const [showAnnouncementModal, setShowAnnouncementModal] = useState(false);
   const [showPrayerModal, setShowPrayerModal] = useState(false);
@@ -250,6 +270,22 @@ export default function Page() {
     () => isNowInsidePrayerWindow(effectivePrayerTimes, prayerPauseMinutes, now),
     [effectivePrayerTimes, prayerPauseMinutes, now]
   );
+
+  const backgroundSchedulePhase = useMemo(
+    () => getBackgroundSchedulePhase(backgroundStartTime, backgroundEndTime, now),
+    [backgroundStartTime, backgroundEndTime, now]
+  );
+
+  const backgroundStatusLabel = useMemo(() => {
+    if (!backgroundMeta?.name) return 'Tidak ada file';
+    if (!backgroundEnabled) return 'Nonaktif';
+    if (backgroundSchedulePhase === 'before_start') return 'Menunggu jadwal';
+    if (backgroundSchedulePhase === 'after_end') return 'Suara Berhenti (Jadwal Selesai)';
+    if (prayerState.active) return 'Dijeda (sholat)';
+    if (activeAnnouncementId) return 'Dijeda (Informasi)';
+    if (!audioReady) return 'Menunggu audio';
+    return '▶ Bermain';
+  }, [backgroundMeta, backgroundEnabled, backgroundSchedulePhase, prayerState.active, activeAnnouncementId, audioReady]);
 
   const nextAnnouncements = useMemo(() => {
     const nowMinutes = now.getHours() * 60 + now.getMinutes();
@@ -753,7 +789,10 @@ export default function Page() {
 
     const nextQueue = [...pendingQueue];
     dueItems.forEach((item) => {
-      if (!nextQueue.includes(item.id)) nextQueue.push(item.id);
+      const repeatCount = Math.max(1, Number.parseInt(item.repeatCount, 10) || 1);
+      for (let index = 0; index < repeatCount; index += 1) {
+        nextQueue.push(item.id);
+      }
     });
     setPendingQueue(nextQueue);
 
@@ -938,6 +977,13 @@ export default function Page() {
       return;
     }
 
+    const repeatCount = Math.max(1, Number.parseInt(newAnnouncementRepeatCount, 10) || 1);
+
+    if (repeatCount < 1) {
+      pushStatus('Jumlah putar announcement minimal 1 kali.', 'error');
+      return;
+    }
+
     if (!file) {
       pushStatus('File audio announcement belum dipilih.', 'error');
       return;
@@ -955,6 +1001,7 @@ export default function Page() {
         id: createId('schedule'),
         title: newAnnouncementTitle.trim(),
         time: newAnnouncementTime,
+        repeatCount,
         blobId: blobData.blobId,
         fileUrl: blobData.url,
         enabled: true,
@@ -966,6 +1013,7 @@ export default function Page() {
 
       setNewAnnouncementTitle('');
       setNewAnnouncementTime('08:00');
+      setNewAnnouncementRepeatCount(1);
       setNewAnnouncementFileName('');
       if (newAnnouncementFileRef.current) {
         newAnnouncementFileRef.current.value = '';
@@ -973,7 +1021,7 @@ export default function Page() {
 
       setIsSavingAnnouncement(false);
       setShowAnnouncementModal(false);
-      pushStatus(`Announcement ${item.title} jam ${item.time} berhasil ditambahkan.`, 'success');
+      pushStatus(`Announcement ${item.title} jam ${item.time} disimpan untuk ${item.repeatCount} kali putar.`, 'success');
     } catch (error) {
       console.error(error);
 
@@ -1308,17 +1356,7 @@ export default function Page() {
             </div>
             <div>
               <span>Backsound</span>
-              <strong>
-                {backgroundMeta?.name
-                  ? prayerState.active
-                    ? 'Dijeda (sholat)'
-                    : activeAnnouncementId
-                    ? 'Dijeda (Informasi)'
-                    : backgroundEnabled
-                    ? '▶ Bermain'
-                    : 'Nonaktif'
-                  : 'Tidak ada file'}
-              </strong>
+              <strong>{backgroundStatusLabel}</strong>
             </div>
             <div>
               <span>Announcement</span>
@@ -1442,7 +1480,7 @@ export default function Page() {
                     <div style={{ flex: 1 }}>
                       <h3>{item.title}</h3>
                       <p style={{ marginBottom: '6px', marginTop: '4px' }}>
-                        {item.time}
+                        {item.time} · {item.repeatCount || 1}x putar
                       </p>
                       <div className="card-tags">
                         {queued && <span className="tag tag-queue">Antri</span>}
@@ -1497,6 +1535,18 @@ export default function Page() {
                   value={newAnnouncementTime}
                   onChange={(event) => setNewAnnouncementTime(event.target.value)}
                 />
+              </label>
+
+              <label className="field">
+                <span>Jumlah putar</span>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={newAnnouncementRepeatCount}
+                  onChange={(event) => setNewAnnouncementRepeatCount(event.target.value)}
+                />
+                <small>Isi berapa kali announcement diputar setiap kali jadwalnya masuk.</small>
               </label>
 
               <label className="field">
