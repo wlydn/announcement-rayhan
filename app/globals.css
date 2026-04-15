@@ -373,6 +373,7 @@ select {
 .announcement-card {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 12px;
   padding: 14px;
   border-radius: 12px;
@@ -380,16 +381,40 @@ select {
   border: 1px solid rgba(148, 163, 184, 0.1);
 }
 
+.announcement-content {
+  flex: 1;
+  min-width: 0;
+}
+
 .announcement-card h3 {
-  margin: 0 0 6px;
+  margin: 0;
   font-size: 14px;
+}
+
+.announcement-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.announcement-time {
+  line-height: 1.2;
+}
+
+.tag-repeat {
+  background: rgba(148, 163, 184, 0.12);
+  color: #e2e8f0;
 }
 
 .card-tags {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
 .large-panel {

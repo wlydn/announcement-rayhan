@@ -1477,11 +1477,12 @@ export default function Page() {
                 const active = activeAnnouncementId === item.id;
                 return (
                   <article className="announcement-card" key={item.id}>
-                    <div style={{ flex: 1 }}>
+                    <div className="announcement-content">
                       <h3>{item.title}</h3>
-                      <p style={{ marginBottom: '6px', marginTop: '4px' }}>
-                        {item.time} · {item.repeatCount || 1}x putar
-                      </p>
+                      <div className="announcement-meta">
+                        <span className="announcement-time">{item.time}</span>
+                        <span className="tag tag-repeat">{item.repeatCount || 1}x putar</span>
+                      </div>
                       <div className="card-tags">
                         {queued && <span className="tag tag-queue">Antri</span>}
                         {active && <span className="tag tag-live">Putar</span>}
