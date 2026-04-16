@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { uploadAudioFile, deleteAudioFile, getAudioFileUrl } from '../lib/blob';
+import { uploadAudioFile, deleteAudioFile, getAudioFileUrl, validateBlobUrl } from '../lib/blob';
 import {
   addSharedAnnouncement,
   deleteSharedAnnouncement,
@@ -195,9 +195,43 @@ function hydrateAnnouncements(items, previousItems = []) {
 
   return items.map((item) => ({
     ...item,
-    repeatCount: Math.max(1, Number.parseInt(item.repeatCount, 10) || 1),
+    repeatCount: getAnnouncementRepeatCount(item),
     lastTriggeredDate: lastTriggeredDateById.get(item.id) || '',
   }));
+}
+
+function getAnnouncementRepeatCount(item) {
+  return Math.max(1, Number.parseInt(item?.repeatCount, 10) || 1);
+}
+
+function createAnnouncementQueueEntries(item, repeatCount = getAnnouncementRepeatCount(item)) {
+  return Array.from({ length: repeatCount }, () => item.id);
+}
+
+function getSharedAudioConfigSignature(sharedAudioConfig) {
+  return JSON.stringify({
+    background: sharedAudioConfig?.background
+      ? {
+          blobId: String(sharedAudioConfig.background.blobId || ''),
+          fileUrl: String(sharedAudioConfig.background.fileUrl || ''),
+          name: String(sharedAudioConfig.background.name || ''),
+        }
+      : null,
+    announcements: Array.isArray(sharedAudioConfig?.announcements)
+      ? sharedAudioConfig.announcements.map((item) => ({
+          id: String(item.id || ''),
+          time: String(item.time || ''),
+          blobId: String(item.blobId || ''),
+          fileUrl: String(item.fileUrl || ''),
+          enabled: item.enabled !== false,
+          repeatCount: getAnnouncementRepeatCount(item),
+        }))
+      : [],
+    backgroundSchedule: {
+      startTime: String(sharedAudioConfig?.backgroundSchedule?.startTime || DEFAULT_BACKGROUND_SCHEDULE.startTime),
+      endTime: String(sharedAudioConfig?.backgroundSchedule?.endTime || DEFAULT_BACKGROUND_SCHEDULE.endTime),
+    },
+  });
 }
 
 function formatOffsetLabel(value) {
@@ -257,6 +291,9 @@ export default function Page() {
   const isStoppingRef = useRef(false); // Track if we're intentionally stopping audio
   const lastTickMinuteRef = useRef('');
   const attemptedInitialLocationRef = useRef(false);
+  const activeAnnouncementIdRef = useRef(null);
+  const announcementBusyRef = useRef(false);
+  const sharedAudioSignatureRef = useRef('');
 
   const todayKey = useMemo(() => formatDateKey(now), [now]);
 
@@ -329,22 +366,63 @@ export default function Page() {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(value));
   }
 
+  useEffect(() => {
+    activeAnnouncementIdRef.current = activeAnnouncementId;
+  }, [activeAnnouncementId]);
+
   async function safelyPlay(audioEl) {
-    if (!audioEl) return false;
+    if (!audioEl) return { played: false, reason: 'missing_element' };
     try {
       await audioEl.play();
-      return true;
+      return { played: true, reason: 'started' };
     } catch (error) {
       // Ignore AbortError - this happens when src is changed during playback
       if (error.name === 'AbortError') {
-        return false;
+        return { played: false, reason: 'aborted', error };
       }
+
+      if (error.name === 'NotAllowedError') {
+        console.error(error);
+        pendingPlayAfterUnlockRef.current = true;
+        setAudioReady(false);
+        pushStatus('Browser menahan autoplay. Klik "Aktifkan Audio" untuk mengizinkan pemutaran.', 'warning');
+        return { played: false, reason: 'blocked', error };
+      }
+
       console.error(error);
-      pendingPlayAfterUnlockRef.current = true;
-      setAudioReady(false);
-      pushStatus('Browser menahan autoplay. Klik "Aktifkan Audio" untuk mengizinkan pemutaran.', 'warning');
-      return false;
+      pushStatus('Audio gagal diputar. File audio tidak tersedia atau formatnya tidak didukung browser.', 'error');
+      return { played: false, reason: 'failed', error };
     }
+  }
+
+  async function skipFailedAnnouncement(reason) {
+    announcementBusyRef.current = false;
+    const audio = announcementAudioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+      audio.removeAttribute('src');
+      audio.load();
+    }
+
+    activeAnnouncementIdRef.current = null;
+    setActiveAnnouncementId(null);
+
+    const updatedQueue = pendingQueue.slice(1);
+    setPendingQueue(updatedQueue);
+
+    pushStatus(reason, 'error');
+
+    if (prayerState.active) {
+      return;
+    }
+
+    if (updatedQueue.length) {
+      await processQueueIfPossible(updatedQueue);
+      return;
+    }
+
+    await resumeBackground('Announcement gagal diputar. Backsound standby dilanjutkan.');
   }
 
   function pauseBackground() {
@@ -380,14 +458,18 @@ export default function Page() {
     audio.volume = backgroundVolume;
 
     console.log('Attempting to play background audio');
-    const success = await safelyPlay(audio);
-    if (success && reason) {
+    const playResult = await safelyPlay(audio);
+    if (playResult.played && reason) {
       pushStatus(reason, 'success');
     }
   }
 
   async function playAnnouncementNow(item, triggerLabel = 'manual') {
     if (!item) return;
+    if (announcementBusyRef.current) return;
+    if (activeAnnouncementIdRef.current) return;
+
+    announcementBusyRef.current = true;
 
     // Get audio URL directly from metadata (no file loading needed)
     const audioUrl = await getAudioFileUrl(item.blobId, item.fileUrl);
@@ -401,12 +483,16 @@ export default function Page() {
     });
     
     if (!audioUrl) {
+      announcementBusyRef.current = false;
       pushStatus(`File untuk announcement "${item.title}" tidak ditemukan. Upload ulang file-nya.`, 'error');
       return;
     }
 
     const audio = announcementAudioRef.current;
-    if (!audio) return;
+    if (!audio) {
+      announcementBusyRef.current = false;
+      return;
+    }
 
     pauseBackground();
 
@@ -416,42 +502,59 @@ export default function Page() {
     
     // Set src with better error handling
     try {
-      audio.src = audioUrl;
       audio.crossOrigin = 'anonymous';
+      audio.preload = 'auto';
+      audio.removeAttribute('src');
+      audio.load();
+      audio.src = audioUrl;
+      audio.load();
     } catch (e) {
+      announcementBusyRef.current = false;
       console.error('Failed to set audio src:', e);
       pushStatus(`Gagal memuat audio: ${e.message}`, 'error');
       return;
     }
 
+    activeAnnouncementIdRef.current = item.id;
     setActiveAnnouncementId(item.id);
-    const played = await safelyPlay(audio);
+    const playResult = await safelyPlay(audio);
 
-    if (!played) {
+    if (!playResult.played) {
+      announcementBusyRef.current = false;
+      activeAnnouncementIdRef.current = null;
       setActiveAnnouncementId(null);
+
+      if (playResult.reason === 'failed') {
+        const errorMsg = audio.error ? getAudioErrorMessage(audio.error) : (playResult.error?.message || 'Gagal memulai playback');
+        await skipFailedAnnouncement(`Gagal memutar announcement "${item.title}" (${errorMsg}). Lanjut ke announcement berikutnya...`);
+        return;
+      }
+
       return;
     }
 
+    announcementBusyRef.current = false;
     const label = triggerLabel === 'schedule' ? 'jadwal' : 'manual';
     pushStatus(`Memutar announcement (${label}): ${item.title}`, 'success');
   }
 
-  async function processQueueIfPossible() {
+  async function processQueueIfPossible(queue = pendingQueue) {
     if (prayerState.active) return;
-    if (activeAnnouncementId) return;
-    if (!pendingQueue.length) {
+    if (announcementBusyRef.current) return;
+    if (activeAnnouncementIdRef.current) return;
+    if (!queue.length) {
       await resumeBackground('Backsound standby aktif.');
       return;
     }
 
-    const nextId = pendingQueue[0];
+    const nextId = queue[0];
     const item = announcements.find((entry) => entry.id === nextId);
 
     if (!item || !item.enabled) {
-      const updated = pendingQueue.slice(1);
+      const updated = queue.slice(1);
       setPendingQueue(updated);
       if (updated.length) {
-        await processQueueIfPossible();
+        await processQueueIfPossible(updated);
       } else {
         await resumeBackground('Backsound standby aktif.');
       }
@@ -644,6 +747,7 @@ export default function Page() {
           }
         }
 
+        sharedAudioSignatureRef.current = getSharedAudioConfigSignature(sharedAudioConfig);
         setBackgroundMeta(sharedAudioConfig.background);
         setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
         setBackgroundStartTime(sharedAudioConfig.backgroundSchedule?.startTime || DEFAULT_BACKGROUND_SCHEDULE.startTime);
@@ -668,10 +772,75 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
+    if (!bootstrapped) return;
+
+    let cancelled = false;
+
+    async function syncSharedAudioConfig() {
+      const sharedAudioConfig = await getSharedAudioConfig();
+      if (cancelled) return;
+
+      const nextSignature = getSharedAudioConfigSignature(sharedAudioConfig);
+      if (nextSignature === sharedAudioSignatureRef.current) {
+        return;
+      }
+
+      sharedAudioSignatureRef.current = nextSignature;
+
+      setBackgroundMeta(sharedAudioConfig.background);
+      setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
+      setBackgroundStartTime(sharedAudioConfig.backgroundSchedule?.startTime || DEFAULT_BACKGROUND_SCHEDULE.startTime);
+      setBackgroundEndTime(sharedAudioConfig.backgroundSchedule?.endTime || DEFAULT_BACKGROUND_SCHEDULE.endTime);
+      setPendingQueue((prev) =>
+        prev.filter((queueId) =>
+          sharedAudioConfig.announcements?.some((item) => item.id === queueId && item.enabled !== false)
+        )
+      );
+
+      const activeId = activeAnnouncementIdRef.current;
+      if (activeId && !sharedAudioConfig.announcements?.some((item) => item.id === activeId && item.enabled !== false)) {
+        const audio = announcementAudioRef.current;
+        if (audio) {
+          announcementBusyRef.current = false;
+          isStoppingRef.current = true;
+          audio.pause();
+          audio.currentTime = 0;
+          audio.removeAttribute('src');
+          audio.load();
+          setTimeout(() => {
+            isStoppingRef.current = false;
+          }, 0);
+        }
+        activeAnnouncementIdRef.current = null;
+        setActiveAnnouncementId(null);
+      }
+    }
+
+    const intervalId = setInterval(() => {
+      syncSharedAudioConfig().catch((error) => {
+        if (!cancelled) {
+          console.warn('Failed to sync shared audio config:', error);
+        }
+      });
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [bootstrapped]);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function loadBackground() {
       if (!backgroundMeta?.blobId) {
+        const audioEl = backgroundAudioRef.current;
+        if (audioEl) {
+          audioEl.pause();
+          audioEl.removeAttribute('src');
+          audioEl.load();
+        }
         setBackgroundUrl('');
         return;
       }
@@ -679,7 +848,35 @@ export default function Page() {
       // Use URL directly from metadata (stored in Vercel Blob)
       const url = await getAudioFileUrl(backgroundMeta.blobId, backgroundMeta.fileUrl);
       if (!url || cancelled) {
+        const audioEl = backgroundAudioRef.current;
+        if (audioEl) {
+          audioEl.pause();
+          audioEl.removeAttribute('src');
+          audioEl.load();
+        }
         setBackgroundUrl('');
+        return;
+      }
+
+      const validation = await validateBlobUrl(url);
+      if (cancelled) {
+        return;
+      }
+
+      if (!validation.isAccessible) {
+        const audioEl = backgroundAudioRef.current;
+        if (audioEl) {
+          audioEl.pause();
+          audioEl.removeAttribute('src');
+          audioEl.load();
+        }
+        setBackgroundUrl('');
+        pushStatus(
+          validation.statusCode === 404
+            ? 'Backsound di config tidak bisa diakses. Periksa lagi blobId/fileUrl di audio-library.json atau upload ulang file backsound.'
+            : 'Backsound gagal diverifikasi. Coba refresh atau upload ulang file backsound.',
+          'warning'
+        );
         return;
       }
 
@@ -689,6 +886,7 @@ export default function Page() {
       const audioEl = backgroundAudioRef.current;
       if (audioEl) {
         audioEl.src = url;
+        audioEl.load();
       }
     }
 
@@ -713,9 +911,17 @@ export default function Page() {
   useEffect(() => {
     // Sinkronisasi src audio element dengan backgroundUrl
     const audioEl = backgroundAudioRef.current;
-    if (audioEl && backgroundUrl) {
+    if (!audioEl) return;
+
+    if (backgroundUrl) {
       audioEl.src = backgroundUrl;
+      audioEl.load();
+      return;
     }
+
+    audioEl.pause();
+    audioEl.removeAttribute('src');
+    audioEl.load();
   }, [backgroundUrl]);
 
   useEffect(() => {
@@ -789,10 +995,7 @@ export default function Page() {
 
     const nextQueue = [...pendingQueue];
     dueItems.forEach((item) => {
-      const repeatCount = Math.max(1, Number.parseInt(item.repeatCount, 10) || 1);
-      for (let index = 0; index < repeatCount; index += 1) {
-        nextQueue.push(item.id);
-      }
+      nextQueue.push(...createAnnouncementQueueEntries(item));
     });
     setPendingQueue(nextQueue);
 
@@ -804,7 +1007,7 @@ export default function Page() {
       return;
     }
 
-    processQueueIfPossible();
+    processQueueIfPossible(nextQueue);
   }, [now, announcements, pendingQueue, prayerState.active, prayerState.prayerName, todayKey, bootstrapped]);
 
   useEffect(() => {
@@ -878,14 +1081,8 @@ export default function Page() {
       
       if (shouldPlay) {
         try {
-          if (!bg.src || bg.src !== backgroundUrl) {
-            bg.src = backgroundUrl;
-            bg.load();
-          }
-          bg.volume = backgroundVolume;
-          bg.loop = true;
-          await bg.play();
-          console.log('Background audio playing after unlock');
+          await resumeBackground();
+          console.log('Background audio play attempted after unlock');
         } catch (e) {
           console.error('Failed to play background after unlock:', e);
         }
@@ -1088,10 +1285,12 @@ export default function Page() {
       if (activeAnnouncementId === id) {
         const audio = announcementAudioRef.current;
         if (audio) {
+          announcementBusyRef.current = false;
           audio.pause();
           audio.currentTime = 0;
           audio.src = '';
         }
+        activeAnnouncementIdRef.current = null;
         setActiveAnnouncementId(null);
       }
     }
@@ -1123,11 +1322,8 @@ export default function Page() {
       return;
     }
 
-    const existsInQueue = pendingQueue.includes(item.id);
-    if (!existsInQueue) {
-      const updatedQueue = [item.id, ...pendingQueue];
-      setPendingQueue(updatedQueue);
-    }
+    const updatedQueue = [...createAnnouncementQueueEntries(item), ...pendingQueue];
+    setPendingQueue(updatedQueue);
 
     if (prayerState.active) {
       pushStatus(
@@ -1137,7 +1333,7 @@ export default function Page() {
       return;
     }
 
-    await processQueueIfPossible();
+    await processQueueIfPossible(updatedQueue);
   }
 
   function handleManualPrayerTimeChange(name, value) {
@@ -1191,14 +1387,10 @@ export default function Page() {
     if (audioEl && audioEl.error) {
       const errorMsg = getAudioErrorMessage(audioEl.error);
       console.error('Audio error details:', errorMsg);
-      
-      // Auto-skip to next announcement on error
-      setActiveAnnouncementId(null);
-      const updatedQueue = pendingQueue.slice(1);
-      setPendingQueue(updatedQueue);
-      
-      pushStatus(`Gagal memutar announcement (${errorMsg}). Lanjut ke announcement berikutnya...`, 'error');
-      processQueueIfPossible();
+
+      skipFailedAnnouncement(`Gagal memutar announcement (${errorMsg}). Lanjut ke announcement berikutnya...`).catch((queueError) => {
+        console.error('Failed to skip broken announcement:', queueError);
+      });
     }
   }
 
@@ -1237,6 +1429,8 @@ export default function Page() {
   }
 
   async function handleAnnouncementEnded() {
+    announcementBusyRef.current = false;
+    activeAnnouncementIdRef.current = null;
     setActiveAnnouncementId(null);
 
     const updatedQueue = pendingQueue.slice(1);
@@ -1248,11 +1442,8 @@ export default function Page() {
     }
 
     if (updatedQueue.length) {
-      const nextItem = announcements.find((entry) => entry.id === updatedQueue[0]);
-      if (nextItem) {
-        await playAnnouncementNow(nextItem, 'schedule');
-        return;
-      }
+      await processQueueIfPossible(updatedQueue);
+      return;
     }
 
     await resumeBackground('Announcement selesai. Backsound standby dilanjutkan.');
@@ -1272,11 +1463,13 @@ export default function Page() {
       }
 
       if (an) {
+        announcementBusyRef.current = false;
         an.pause();
         an.currentTime = 0;
         an.src = '';
       }
 
+      activeAnnouncementIdRef.current = null;
       setActiveAnnouncementId(null);
       setBackgroundEnabled(false);
       setAudioReady(false);
