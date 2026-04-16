@@ -41,7 +41,13 @@ function normalizeBackground(background) {
 }
 
 function normalizeAnnouncement(announcement) {
-  if (!announcement?.id || !announcement?.title || !announcement?.time || !announcement?.blobId || !announcement?.fileUrl) {
+  if (
+    !announcement?.id ||
+    !announcement?.title ||
+    !announcement?.time ||
+    !announcement?.blobId ||
+    !announcement?.fileUrl
+  ) {
     return null;
   }
 
@@ -80,7 +86,10 @@ function normalizeLibrary(data) {
     ...base,
     background: normalizeBackground(data?.background),
     announcements: Array.isArray(data?.announcements)
-      ? data.announcements.map(normalizeAnnouncement).filter(Boolean).sort((a, b) => a.time.localeCompare(b.time))
+      ? data.announcements
+          .map(normalizeAnnouncement)
+          .filter(Boolean)
+          .sort((a, b) => a.time.localeCompare(b.time))
       : base.announcements,
     backgroundSchedule: normalizeBackgroundSchedule(data?.backgroundSchedule),
   };
@@ -194,7 +203,8 @@ export async function POST(request) {
 
     if (action === 'delete-announcement') {
       const announcementId = String(body.id || '');
-      const deletedAnnouncement = currentLibrary.announcements.find((item) => item.id === announcementId) || null;
+      const deletedAnnouncement =
+        currentLibrary.announcements.find((item) => item.id === announcementId) || null;
 
       const updatedLibrary = await writeLibrary({
         ...currentLibrary,
