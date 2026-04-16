@@ -59,6 +59,9 @@ const STORAGE_KEYS = {
   settings: 'app-settings-v1',
 };
 
+const SHARED_AUDIO_SYNC_INTERVAL_MS = 30 * 60 * 1000;
+const SHARED_AUDIO_SYNC_MIN_GAP_MS = 30 * 1000;
+
 const PRAYER_METHOD_OPTIONS = [
   { value: 20, label: 'Kementerian Agama RI (default)' },
   { value: 11, label: 'Singapore / Muis' },
@@ -234,6 +237,17 @@ function getSharedAudioConfigSignature(sharedAudioConfig) {
   });
 }
 
+function isSameBackgroundMeta(left, right) {
+  if (!left && !right) return true;
+  if (!left || !right) return false;
+
+  return (
+    String(left.blobId || '') === String(right.blobId || '') &&
+    String(left.fileUrl || '') === String(right.fileUrl || '') &&
+    String(left.name || '') === String(right.name || '')
+  );
+}
+
 function formatOffsetLabel(value) {
   const number = Number(value || 0);
   if (number === 0) return '0 menit';
@@ -294,6 +308,8 @@ export default function Page() {
   const activeAnnouncementIdRef = useRef(null);
   const announcementBusyRef = useRef(false);
   const sharedAudioSignatureRef = useRef('');
+  const sharedAudioSyncInFlightRef = useRef(false);
+  const lastSharedAudioSyncAtRef = useRef(0);
 
   const todayKey = useMemo(() => formatDateKey(now), [now]);
 
@@ -364,6 +380,19 @@ export default function Page() {
 
   function persistSettings(value) {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(value));
+  }
+
+  function applySharedAudioConfig(sharedAudioConfig) {
+    const nextBackground = sharedAudioConfig.background;
+    const nextBackgroundStartTime =
+      sharedAudioConfig.backgroundSchedule?.startTime || DEFAULT_BACKGROUND_SCHEDULE.startTime;
+    const nextBackgroundEndTime =
+      sharedAudioConfig.backgroundSchedule?.endTime || DEFAULT_BACKGROUND_SCHEDULE.endTime;
+
+    setBackgroundMeta((prev) => (isSameBackgroundMeta(prev, nextBackground) ? prev : nextBackground));
+    setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
+    setBackgroundStartTime((prev) => (prev === nextBackgroundStartTime ? prev : nextBackgroundStartTime));
+    setBackgroundEndTime((prev) => (prev === nextBackgroundEndTime ? prev : nextBackgroundEndTime));
   }
 
   useEffect(() => {
@@ -748,10 +777,8 @@ export default function Page() {
         }
 
         sharedAudioSignatureRef.current = getSharedAudioConfigSignature(sharedAudioConfig);
-        setBackgroundMeta(sharedAudioConfig.background);
-        setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
-        setBackgroundStartTime(sharedAudioConfig.backgroundSchedule?.startTime || DEFAULT_BACKGROUND_SCHEDULE.startTime);
-        setBackgroundEndTime(sharedAudioConfig.backgroundSchedule?.endTime || DEFAULT_BACKGROUND_SCHEDULE.endTime);
+        lastSharedAudioSyncAtRef.current = Date.now();
+        applySharedAudioConfig(sharedAudioConfig);
       } catch (error) {
         console.error('Failed to load shared audio config:', error);
         if (!cancelled) {
@@ -776,44 +803,78 @@ export default function Page() {
 
     let cancelled = false;
 
-    async function syncSharedAudioConfig() {
-      const sharedAudioConfig = await getSharedAudioConfig();
+    async function syncSharedAudioConfig({ force = false } = {}) {
       if (cancelled) return;
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible' && !force) return;
+      if (sharedAudioSyncInFlightRef.current) return;
 
-      const nextSignature = getSharedAudioConfigSignature(sharedAudioConfig);
-      if (nextSignature === sharedAudioSignatureRef.current) {
+      const nowAt = Date.now();
+      if (!force && nowAt - lastSharedAudioSyncAtRef.current < SHARED_AUDIO_SYNC_MIN_GAP_MS) {
         return;
       }
 
-      sharedAudioSignatureRef.current = nextSignature;
+      sharedAudioSyncInFlightRef.current = true;
 
-      setBackgroundMeta(sharedAudioConfig.background);
-      setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
-      setBackgroundStartTime(sharedAudioConfig.backgroundSchedule?.startTime || DEFAULT_BACKGROUND_SCHEDULE.startTime);
-      setBackgroundEndTime(sharedAudioConfig.backgroundSchedule?.endTime || DEFAULT_BACKGROUND_SCHEDULE.endTime);
-      setPendingQueue((prev) =>
-        prev.filter((queueId) =>
-          sharedAudioConfig.announcements?.some((item) => item.id === queueId && item.enabled !== false)
-        )
-      );
+      try {
+        const sharedAudioConfig = await getSharedAudioConfig();
+        if (cancelled) return;
 
-      const activeId = activeAnnouncementIdRef.current;
-      if (activeId && !sharedAudioConfig.announcements?.some((item) => item.id === activeId && item.enabled !== false)) {
-        const audio = announcementAudioRef.current;
-        if (audio) {
-          announcementBusyRef.current = false;
-          isStoppingRef.current = true;
-          audio.pause();
-          audio.currentTime = 0;
-          audio.removeAttribute('src');
-          audio.load();
-          setTimeout(() => {
-            isStoppingRef.current = false;
-          }, 0);
+        lastSharedAudioSyncAtRef.current = Date.now();
+
+        const nextSignature = getSharedAudioConfigSignature(sharedAudioConfig);
+        if (nextSignature === sharedAudioSignatureRef.current) {
+          return;
         }
-        activeAnnouncementIdRef.current = null;
-        setActiveAnnouncementId(null);
+
+        sharedAudioSignatureRef.current = nextSignature;
+
+        applySharedAudioConfig(sharedAudioConfig);
+        setPendingQueue((prev) =>
+          prev.filter((queueId) =>
+            sharedAudioConfig.announcements?.some((item) => item.id === queueId && item.enabled !== false)
+          )
+        );
+
+        const activeId = activeAnnouncementIdRef.current;
+        if (activeId && !sharedAudioConfig.announcements?.some((item) => item.id === activeId && item.enabled !== false)) {
+          const audio = announcementAudioRef.current;
+          if (audio) {
+            announcementBusyRef.current = false;
+            isStoppingRef.current = true;
+            audio.pause();
+            audio.currentTime = 0;
+            audio.removeAttribute('src');
+            audio.load();
+            setTimeout(() => {
+              isStoppingRef.current = false;
+            }, 0);
+          }
+          activeAnnouncementIdRef.current = null;
+          setActiveAnnouncementId(null);
+        }
+      } finally {
+        sharedAudioSyncInFlightRef.current = false;
       }
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState !== 'visible') {
+        return;
+      }
+
+      syncSharedAudioConfig().catch((error) => {
+        if (!cancelled) {
+          console.warn('Failed to sync shared audio config:', error);
+        }
+      });
+    }
+
+    function handleWindowFocus() {
+      syncSharedAudioConfig().catch((error) => {
+        if (!cancelled) {
+          console.warn('Failed to sync shared audio config:', error);
+        }
+      });
     }
 
     const intervalId = setInterval(() => {
@@ -822,11 +883,27 @@ export default function Page() {
           console.warn('Failed to sync shared audio config:', error);
         }
       });
-    }, 15000);
+    }, SHARED_AUDIO_SYNC_INTERVAL_MS);
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', handleWindowFocus);
+    }
 
     return () => {
       cancelled = true;
       clearInterval(intervalId);
+
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', handleWindowFocus);
+      }
     };
   }, [bootstrapped]);
 

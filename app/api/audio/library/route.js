@@ -1,13 +1,17 @@
-import { list, put } from '@vercel/blob';
+import { head, put } from '@vercel/blob';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 const CONFIG_PATH = 'config/audio-library.json';
+const LIBRARY_CACHE_TTL_MS = 30 * 1000;
 const DEFAULT_BACKGROUND_SCHEDULE = {
   startTime: '06:00',
   endTime: '17:45',
 };
+
+let cachedLibrary = null;
+let cachedLibraryExpiresAt = 0;
 
 function createDefaultLibrary() {
   return {
@@ -95,23 +99,47 @@ function normalizeLibrary(data) {
   };
 }
 
-async function getConfigBlob() {
-  const response = await list({
-    prefix: CONFIG_PATH,
-    limit: 100,
-  });
+function getCachedLibrary() {
+  if (cachedLibrary && Date.now() < cachedLibraryExpiresAt) {
+    return cachedLibrary;
+  }
 
-  const matches = response.blobs
-    .filter((blob) => blob.pathname === CONFIG_PATH)
-    .sort((a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime());
-
-  return matches[0] || null;
+  return null;
 }
 
-async function readLibrary() {
-  const blob = await getConfigBlob();
-  if (!blob) {
-    return createDefaultLibrary();
+function setCachedLibrary(library) {
+  cachedLibrary = normalizeLibrary(library);
+  cachedLibraryExpiresAt = Date.now() + LIBRARY_CACHE_TTL_MS;
+  return cachedLibrary;
+}
+
+function isBlobNotFoundError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return (
+    error?.name === 'BlobNotFoundError' ||
+    error?.code === 'not_found' ||
+    message.includes('not found') ||
+    message.includes('404')
+  );
+}
+
+async function readLibrary({ bypassCache = false } = {}) {
+  if (!bypassCache) {
+    const cached = getCachedLibrary();
+    if (cached) {
+      return cached;
+    }
+  }
+
+  let blob;
+  try {
+    blob = await head(CONFIG_PATH);
+  } catch (error) {
+    if (isBlobNotFoundError(error)) {
+      return setCachedLibrary(createDefaultLibrary());
+    }
+
+    throw error;
   }
 
   const response = await fetch(blob.url, {
@@ -123,7 +151,7 @@ async function readLibrary() {
   }
 
   const payload = await response.json();
-  return normalizeLibrary(payload);
+  return setCachedLibrary(payload);
 }
 
 async function writeLibrary(library) {
@@ -136,7 +164,7 @@ async function writeLibrary(library) {
     cacheControlMaxAge: 0,
   });
 
-  return normalized;
+  return setCachedLibrary(normalized);
 }
 
 export async function GET() {
@@ -153,7 +181,7 @@ export async function POST(request) {
   try {
     const body = await request.json();
     const action = body?.action;
-    const currentLibrary = await readLibrary();
+    const currentLibrary = await readLibrary({ bypassCache: true });
 
     if (action === 'set-background') {
       const nextBackground = normalizeBackground(body.background);
