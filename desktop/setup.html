@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; img-src 'self' data:" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Alamat Server</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 20px;
+      background: #e8f2f4; color: #1b2a4a;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    }
+    main {
+      width: min(520px, 100%); background: #fbfdfd; border: 1px solid #bcd4da; border-radius: 6px;
+      box-shadow: 4px 4px 0 rgba(27, 42, 74, 0.12); overflow: hidden;
+    }
+    header { background: #1b2a4a; color: #f4f8fb; padding: 18px 22px; border-bottom: 4px solid #f69612; }
+    header p { margin: 0 0 6px; color: #f69612; font-size: 11px; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; }
+    header h1 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: 22px; font-weight: 600; }
+    form { padding: 22px; display: grid; gap: 14px; }
+    label { font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+    input {
+      width: 100%; margin-top: 6px; padding: 10px 12px; font: inherit; font-size: 14px;
+      border: 1px solid #8db3bc; border-radius: 4px; background: #fff; color: #1b2a4a;
+    }
+    input:focus { outline: 2px solid #0c7a89; border-color: #0c7a89; }
+    .hint { margin: 0; font-size: 13px; line-height: 1.55; color: #526079; }
+    .error { margin: 0; min-height: 18px; font-size: 13px; font-weight: 600; color: #a8362c; }
+    .actions { display: flex; gap: 10px; justify-content: flex-end; }
+    button {
+      font: inherit; font-size: 13px; font-weight: 700; padding: 10px 16px; border-radius: 4px; cursor: pointer;
+      border: 1px solid #8db3bc; background: #fbfdfd; color: #1b2a4a;
+    }
+    button.primary { background: #0c7a89; border-color: #095d69; color: #fff; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    [hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p>IT Rayhan Hospital</p>
+      <h1>Alamat server aplikasi</h1>
+    </header>
+    <form id="form" novalidate>
+      <p class="hint">Masukkan alamat situs Announcement IT Rayhan yang sudah di-deploy. Alamat ini hanya perlu diisi sekali.</p>
+      <div>
+        <label for="url">Alamat (URL)</label>
+        <input id="url" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://nama-proyek.vercel.app" />
+      </div>
+      <p class="error" id="error" role="alert"></p>
+      <div class="actions">
+        <button type="button" id="cancel" hidden>Batal</button>
+        <button type="submit" class="primary" id="save">Simpan dan buka</button>
+      </div>
+    </form>
+  </main>
+  <script src="setup.js"></script>
+</body>
+</html>

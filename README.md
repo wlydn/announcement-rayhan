@@ -80,6 +80,16 @@ Buka `http://localhost:3000`
 - Setiap sholat hanya diputar sekali per hari, tercatat di `localStorage`. Jika halaman baru dibuka lebih dari 2 menit setelah jam sholat, adzan tidak diputar.
 - Di panel **Adzan** ada toggle per sholat, pengaturan volume, tombol **Tes Adzan** / **Tes Adzan Subuh**, dan **Stop Adzan**. **Stop Audio** juga menghentikan adzan.
 
+## Aplikasi desktop (Electron)
+Aplikasi desktop Windows adalah pembungkus tipis yang memuat situs yang sudah di-deploy (bawaan: `https://www.wlydn.web.id/`). Data tetap di server dan `BLOB_READ_WRITE_TOKEN` tidak ikut masuk ke aplikasi, sehingga versi web dan desktop selalu sinkron. Butuh koneksi internet.
+
+- **Kompatibilitas Windows 7:** aplikasi memakai Electron 22.3.27 (Chromium 108), versi terakhir yang masih mendukung Windows 7/8/8.1. Jangan naikkan Electron ke versi 23 ke atas jika masih ada PC Windows 7. Windows 7 sebaiknya sudah terpasang Service Pack 1.
+- Jalankan untuk pengembangan: `npm run desktop`. Alamat bisa diganti lewat menu **Aplikasi > Ubah alamat server...** dan disimpan di folder data pengguna.
+- Untuk uji lokal, set variabel `ANNOUNCEMENT_URL` (contoh `http://localhost:3000`). Alamat `http` hanya diterima untuk `localhost`/`127.0.0.1`.
+- Buat installer: `node node_modules\electron-builder\cli.js --win nsis --x64 --ia32 --publish never` (atau `npm run desktop:dist`). Hasilnya satu installer bernama `release/Announcement IT Rayhan v3.0.exe` (shortcut dan nama aplikasi: "Announcement IT Rayhan") yang berisi versi 64-bit dan 32-bit; installer memilih yang cocok otomatis. Build pertama mengunduh Electron dan NSIS sehingga bisa memakan beberapa menit.
+- Perilaku: audio terjadwal boleh diputar tanpa klik, sistem dicegah tidur, dan menutup jendela hanya menyembunyikannya ke tray agar adzan tidak terlewat. Gunakan **Keluar** di menu tray untuk menutup sepenuhnya. Menu **Jalankan saat Windows menyala** tersedia pada versi terpasang.
+- Keamanan: situs hanya bisa dibuka dari alamat yang tersimpan; tautan ke domain lain dibuka di browser bawaan, izin kamera/lokasi/mikrofon ditolak, dan API desktop tidak terekspos ke situs.
+- Installer belum ditandatangani, jadi Windows SmartScreen bisa menampilkan peringatan saat pertama dipasang.
 
 ## Struktur singkat
 ```text
@@ -87,6 +97,13 @@ app/
   layout.js
   page.js
   globals.css
+desktop/
+  main.js        (proses utama Electron)
+  config.js      (simpan dan validasi alamat server)
+  preload.js     (API terbatas untuk halaman setup/offline)
+  setup.html     (form alamat server)
+  offline.html   (halaman saat tidak ada koneksi)
+  build/icon.ico
 lib/
   blob.js
 package.json

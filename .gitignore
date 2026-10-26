@@ -12,7 +12,9 @@ yarn.lock
 .next/
 out/
 dist/
+release/
 build/
+!desktop/build/
 
 # IDE
 .vscode/
