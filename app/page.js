@@ -10,6 +10,7 @@ import {
   setSharedAdzanUrls,
   setSharedBackgroundSchedule,
   toggleSharedAnnouncement,
+  updateSharedAnnouncement,
 } from '../lib/audio-config';
 
 const DEFAULT_PRAYER_TIMES = {
@@ -428,6 +429,7 @@ export default function Page() {
   const [newAnnouncementEndTime, setNewAnnouncementEndTime] = useState('15:00');
   const [newAnnouncementFileName, setNewAnnouncementFileName] = useState('');
   const [showAnnouncementModal, setShowAnnouncementModal] = useState(false);
+  const [editingAnnouncement, setEditingAnnouncement] = useState(null);
   const [showPrayerModal, setShowPrayerModal] = useState(false);
   const newAnnouncementFileRef = useRef(null);
   const [isSavingAnnouncement, setIsSavingAnnouncement] = useState(false);
@@ -1093,7 +1095,7 @@ export default function Page() {
 
     try {
       const [year, month, day] = todayKey.split('-');
-      const url = `${MYQURAN_API_BASE}/jadwal/${cityId}/${year}/${month}/${day}`;
+      const url = `${MYQURAN_API_BASE}/jadwal/${encodeURIComponent(cityId)}/${encodeURIComponent(year)}/${encodeURIComponent(month)}/${encodeURIComponent(day)}`;
 
       const response = await fetch(url, { cache: 'no-store' });
 
@@ -1831,7 +1833,28 @@ export default function Page() {
     }
   }
 
+  function openAnnouncementForm(item = null) {
+    setEditingAnnouncement(item);
+    setNewAnnouncementTitle(item?.title || '');
+    setNewAnnouncementTime(item?.time || '08:00');
+    setNewAnnouncementRepeatCount(item?.repeatCount || 1);
+    setNewAnnouncementPeriodic(Boolean(item?.intervalMinutes));
+    setNewAnnouncementInterval(item?.intervalMinutes || 15);
+    setNewAnnouncementEndTime(item?.endTime || '15:00');
+    setNewAnnouncementFileName('');
+    setShowAnnouncementModal(true);
+  }
+
+  function closeAnnouncementForm() {
+    if (!isSavingAnnouncement) setShowAnnouncementModal(false);
+  }
+
   async function handleSaveAnnouncement() {
+    if (isSavingAnnouncement) return;
+    if (editingAnnouncement && (activeAnnouncementIdRef.current === editingAnnouncement.id || pendingQueue.includes(editingAnnouncement.id))) {
+      pushStatus('Hentikan announcement dan antreannya sebelum menyimpan perubahan.', 'warning');
+      return;
+    }
     const file = newAnnouncementFileRef.current?.files?.[0];
 
     if (!newAnnouncementTitle.trim()) {
@@ -1863,7 +1886,7 @@ export default function Page() {
       }
     }
 
-    if (!file) {
+    if (!file && !editingAnnouncement) {
       pushStatus('File audio announcement belum dipilih.', 'error');
       return;
     }
@@ -1872,24 +1895,28 @@ export default function Page() {
     let blobData = null;
 
     try {
-      pushStatus('Mengunggah announcement ke Vercel Blob...', 'info');
-      
-      blobData = await uploadAudioFile(file);
+      pushStatus('Menyimpan announcement...', 'info');
+      if (file) blobData = await uploadAudioFile(file);
 
       const item = {
-        id: createId('schedule'),
+        id: editingAnnouncement?.id || createId('schedule'),
         title: newAnnouncementTitle.trim(),
         time: newAnnouncementTime,
         intervalMinutes,
         endTime: intervalMinutes > 0 ? newAnnouncementEndTime : '',
         repeatCount,
-        blobId: blobData.blobId,
-        fileUrl: blobData.url,
-        enabled: true,
-        createdAt: Date.now(),
+        blobId: blobData?.blobId || editingAnnouncement?.blobId,
+        fileUrl: blobData?.url || editingAnnouncement?.fileUrl,
+        enabled: editingAnnouncement?.enabled ?? true,
+        createdAt: editingAnnouncement?.createdAt || Date.now(),
       };
 
-      const sharedAudioConfig = await addSharedAnnouncement(item);
+      const sharedAudioConfig = editingAnnouncement
+        ? await updateSharedAnnouncement(item)
+        : await addSharedAnnouncement(item);
+      // Metadata sudah tersimpan: jangan hapus upload baru jika pembaruan UI gagal.
+      blobData = null;
+      // Audio lama dipertahankan agar playback perangkat lain tidak terputus.
       setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
 
       setNewAnnouncementTitle('');
@@ -1903,7 +1930,7 @@ export default function Page() {
         newAnnouncementFileRef.current.value = '';
       }
 
-      setIsSavingAnnouncement(false);
+      setEditingAnnouncement(null);
       setShowAnnouncementModal(false);
       pushStatus(
         item.intervalMinutes > 0
@@ -2250,12 +2277,6 @@ export default function Page() {
     }
   }
 
-  const prayerSourceSummary = prayerConfig.mode === 'auto'
-    ? prayerApiCache.fetchedAt
-      ? `API MyQuran • ${prayerApiCache.source || prayerConfig.cityName || 'kota belum dipilih'} • Kemenag RI`
-      : hasValidCity(prayerConfig) ? 'API belum sinkron' : 'API • pilih kota terlebih dahulu'
-    : 'Manual';
-
   if (!bootstrapped) {
     return (
       <main className="page-shell">
@@ -2574,7 +2595,7 @@ export default function Page() {
         <div className="panel">
           <div className="panel-header" style={{ justifyContent: 'space-between' }}>
             <h2>Daftar Announcement ({announcements.length})</h2>
-            <button className="primary-button" onClick={() => setShowAnnouncementModal(true)} style={{ padding: '8px 20px', fontSize: '14px', whiteSpace: 'nowrap' }}>
+            <button className="primary-button" onClick={() => openAnnouncementForm()} style={{ padding: '8px 20px', fontSize: '14px', whiteSpace: 'nowrap' }}>
              + Tambah Pengumuman
             </button>
           </div>
@@ -2614,6 +2635,9 @@ export default function Page() {
                           Putar
                         </button>
                       )}
+                      <button className="secondary-button" onClick={() => openAnnouncementForm(item)} disabled={active || queued} title={active || queued ? 'Hentikan pemutaran/antrean sebelum mengedit' : 'Edit announcement'} style={{ padding: '6px 10px', fontSize: '12px' }}>
+                        Edit
+                      </button>
                       <button className="secondary-button" onClick={() => handleToggleAnnouncement(item.id)} style={{ padding: '6px 10px', fontSize: '12px' }}>
                         {item.enabled ? 'Off' : 'On'}
                       </button>
@@ -2630,11 +2654,11 @@ export default function Page() {
       </section>
 
       {showAnnouncementModal && (
-        <div className="modal-overlay" onClick={() => setShowAnnouncementModal(false)}>
+        <div className="modal-overlay" onClick={closeAnnouncementForm}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h2>Tambah Announcement</h2>
-              <button className="modal-close" onClick={() => setShowAnnouncementModal(false)}>✕</button>
+              <h2>{editingAnnouncement ? 'Edit Announcement' : 'Tambah Announcement'}</h2>
+              <button className="modal-close" onClick={closeAnnouncementForm} disabled={isSavingAnnouncement}>✕</button>
             </div>
 
             <div className="modal-body">
@@ -2715,12 +2739,12 @@ export default function Page() {
                   accept="audio/*"
                   onChange={(event) => setNewAnnouncementFileName(event.target.files?.[0]?.name || '')}
                 />
-                <small>{newAnnouncementFileName || 'Belum ada file dipilih'}</small>
+                <small>{newAnnouncementFileName || (editingAnnouncement ? 'Opsional: kosongkan untuk tetap memakai audio sebelumnya.' : 'Belum ada file dipilih')}</small>
               </label>
             </div>
 
             <div className="modal-footer">
-              <button className="secondary-button" onClick={() => setShowAnnouncementModal(false)}>
+              <button className="secondary-button" onClick={closeAnnouncementForm} disabled={isSavingAnnouncement}>
                 Batal
               </button>
               <button className="primary-button" onClick={handleSaveAnnouncement} disabled={isSavingAnnouncement}>

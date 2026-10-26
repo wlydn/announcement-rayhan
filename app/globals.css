@@ -163,8 +163,7 @@ select {
   align-items: start;
 }
 
-.panel,
-.large-panel {
+.panel {
   padding: 20px 22px 22px;
 }
 
@@ -193,14 +192,8 @@ select {
   letter-spacing: 0.14em;
 }
 
-.clock-panel,
-.large-panel {
-  min-height: auto;
-}
-
 /* ---------- Kotak ringkasan ---------- */
 
-.status-box,
 .summary-box,
 .empty-state {
   border: 1px dashed #93bcc5;
@@ -210,7 +203,6 @@ select {
   font-size: 13px;
 }
 
-.status-box p,
 .summary-box strong,
 .summary-box span,
 .empty-state {
@@ -218,13 +210,8 @@ select {
   color: var(--muted);
 }
 
-.status-box strong,
 .summary-box strong {
   color: var(--ink);
-}
-
-.summary-spaced {
-  margin-top: 14px;
 }
 
 /* ---------- Banner kondisi (Status Monitor) ---------- */
@@ -314,8 +301,6 @@ select {
 
 .info-list span,
 .upcoming-row p,
-.helper-text,
-.muted,
 .field small,
 .announcement-card p {
   color: var(--muted);
@@ -455,32 +440,12 @@ input[type='checkbox'] {
   height: 16px;
 }
 
-.grid-two,
-.grid-three,
-.grid-four,
-.grid-five {
+.grid-two {
   display: grid;
   gap: 12px;
-}
-
-.grid-two {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.grid-three {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.grid-four {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.grid-five {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-}
-
-.inline-controls,
-.panel-actions,
 .card-actions {
   margin: 12px 0;
   display: grid;
@@ -494,12 +459,6 @@ input[type='checkbox'] {
   color: var(--ink);
   font-size: 13px;
   cursor: pointer;
-}
-
-.helper-text {
-  margin-top: 8px;
-  font-size: 12px;
-  line-height: 1.55;
 }
 
 /* ---------- Label status ---------- */
@@ -525,8 +484,7 @@ input[type='checkbox'] {
   border-color: #9ed6de;
 }
 
-.badge-success,
-.tag-on {
+.badge-success {
   background: #dcebdf;
   color: #1f5c38;
   border-color: #b0d0ba;
@@ -633,42 +591,6 @@ input[type='checkbox'] {
   grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin-bottom: 12px;
-}
-
-.compact-box {
-  display: grid;
-  gap: 4px;
-}
-
-.compact-box small {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.prayer-preview-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.prayer-preview-card {
-  border-radius: 4px;
-  padding: 11px 12px;
-  background: var(--paper-sunk);
-  border: 1px solid var(--line-soft);
-  display: grid;
-  gap: 4px;
-  font-size: 12px;
-}
-
-.prayer-preview-card span,
-.prayer-preview-card small {
-  color: var(--muted);
-}
-
-.prayer-preview-card strong {
-  font-family: var(--font-mono);
-  font-size: 16px;
 }
 
 /* ---------- Modal ---------- */
@@ -794,8 +716,7 @@ input[type='checkbox'] {
 @media (max-width: 1024px) {
   .dashboard-grid,
   .two-column-section,
-  .hero-card,
-  .grid-three {
+  .hero-card {
     grid-template-columns: 1fr;
   }
 
@@ -833,8 +754,7 @@ input[type='checkbox'] {
   }
 
   .grid-two,
-  .mode-switch,
-  .prayer-preview-grid {
+  .mode-switch {
     grid-template-columns: 1fr;
   }
 

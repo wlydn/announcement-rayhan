@@ -119,6 +119,8 @@ function createWindow() {
     return { action: 'deny' };
   });
   contents.on('will-navigate', guardNavigation);
+  // Redirect server (3xx) tidak memicu will-navigate; tanpa ini situs bisa dialihkan ke origin lain di dalam jendela.
+  contents.on('will-redirect', guardNavigation);
 
   contents.on('did-navigate', (_event, url) => {
     if (!awaitingInitialLoad || !/^https?:/i.test(url)) return;

@@ -2,10 +2,16 @@ import { handleUpload } from '@vercel/blob/client';
 import { NextResponse } from 'next/server';
 import { AUDIO_CONTENT_TYPES, MAX_AUDIO_SIZE } from '../../../../lib/audio-upload';
 import { forbiddenResponse, isSameOriginRequest } from '../../../../lib/request-guard';
+import { isRateLimited } from '../../../../lib/rate-limit';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 const CLIENT_TOKEN_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+// Pathname upload: hanya audio/<nama-file> dengan karakter aman (tanpa "..", slash tambahan, dsb.).
+const SAFE_AUDIO_PATH = /^audio\/[A-Za-z0-9._-]{1,200}$/;
+
+// Hanya pesan dari error jenis ini yang boleh dikirim ke client; error lain dibuat generik.
+class UploadValidationError extends Error {}
 
 function parseClientPayload(clientPayload) {
   if (!clientPayload) return null;
@@ -13,12 +19,12 @@ function parseClientPayload(clientPayload) {
   try {
     return JSON.parse(clientPayload);
   } catch {
-    throw new Error('Invalid upload payload.');
+    throw new UploadValidationError('Invalid upload payload.');
   }
 }
 
 function isSafeAudioPath(pathname) {
-  return typeof pathname === 'string' && pathname.startsWith('audio/');
+  return typeof pathname === 'string' && SAFE_AUDIO_PATH.test(pathname);
 }
 
 export async function POST(request) {
@@ -36,8 +42,13 @@ export async function POST(request) {
       body,
       request,
       onBeforeGenerateToken: async (pathname, clientPayload, multipart) => {
+        // Callback 'upload-completed' dari Vercel tidak melewati bagian ini, jadi tidak ikut dibatasi.
+        if (isRateLimited(request, 'upload-token', { limit: 20, windowMs: 60 * 1000 })) {
+          throw new UploadValidationError('Terlalu banyak permintaan upload. Coba lagi sebentar.');
+        }
+
         if (!isSafeAudioPath(pathname)) {
-          throw new Error('Invalid upload path.');
+          throw new UploadValidationError('Invalid upload path.');
         }
 
         const payload = parseClientPayload(clientPayload);
@@ -45,15 +56,15 @@ export async function POST(request) {
         const fileSize = Number(payload?.fileSize || 0);
 
         if (!contentType || !AUDIO_CONTENT_TYPES.includes(contentType)) {
-          throw new Error('File harus berupa audio.');
+          throw new UploadValidationError('File harus berupa audio.');
         }
 
         if (!Number.isFinite(fileSize) || fileSize <= 0) {
-          throw new Error('Ukuran file tidak valid.');
+          throw new UploadValidationError('Ukuran file tidak valid.');
         }
 
         if (fileSize > MAX_AUDIO_SIZE) {
-          throw new Error(`File terlalu besar. Maksimal ${MAX_AUDIO_SIZE / 1024 / 1024}MB.`);
+          throw new UploadValidationError(`File terlalu besar. Maksimal ${MAX_AUDIO_SIZE / 1024 / 1024}MB.`);
         }
 
         console.log('Generating Blob client token:', {
@@ -89,7 +100,7 @@ export async function POST(request) {
 
     return NextResponse.json(
       {
-        error: error.message || 'Upload token generation failed.',
+        error: error instanceof UploadValidationError ? error.message : 'Upload token generation failed.',
       },
       { status: 400, headers: { 'Cache-Control': 'no-store' } }
     );

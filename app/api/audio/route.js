@@ -1,5 +1,6 @@
 import { del } from '@vercel/blob';
 import { forbiddenResponse, isSameOriginRequest, resolveDeletableAudioPath } from '../../../lib/request-guard';
+import { isRateLimited, tooManyRequestsResponse } from '../../../lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,6 +17,10 @@ export async function DELETE(request) {
   }
 
   try {
+    if (isRateLimited(request, 'audio-delete', { limit: 30, windowMs: 60 * 1000 })) {
+      return tooManyRequestsResponse();
+    }
+
     const { url, blobId } = await request.json();
 
     if (!url && !blobId) {

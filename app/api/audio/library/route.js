@@ -1,5 +1,6 @@
 import { head, put } from '@vercel/blob';
 import { forbiddenResponse, isSameOriginRequest } from '../../../../lib/request-guard';
+import { isRateLimited, tooManyRequestsResponse } from '../../../../lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -135,7 +136,7 @@ function normalizeBackgroundSchedule(backgroundSchedule) {
   const startTime = String(backgroundSchedule?.startTime || DEFAULT_BACKGROUND_SCHEDULE.startTime);
   const endTime = String(backgroundSchedule?.endTime || DEFAULT_BACKGROUND_SCHEDULE.endTime);
 
-  if (!startTime.includes(':') || !endTime.includes(':')) {
+  if (!TIME_PATTERN.test(startTime) || !TIME_PATTERN.test(endTime)) {
     return DEFAULT_BACKGROUND_SCHEDULE;
   }
 
@@ -238,7 +239,8 @@ export async function GET() {
     return jsonResponse(library);
   } catch (error) {
     console.error('Failed to load shared audio config:', error);
-    return jsonResponse({ error: error.message || 'Failed to load shared audio config.' }, 500);
+    // Jangan bocorkan pesan error internal (path, status Blob, dsb.) ke client.
+    return jsonResponse({ error: 'Failed to load shared audio config.' }, 500);
   }
 }
 
@@ -248,6 +250,10 @@ export async function POST(request) {
   }
 
   try {
+    if (isRateLimited(request, 'library-write', { limit: 60, windowMs: 60 * 1000 })) {
+      return tooManyRequestsResponse();
+    }
+
     const body = await request.json();
     const action = body?.action;
     const currentLibrary = await readLibrary({ bypassCache: true });
@@ -325,6 +331,31 @@ export async function POST(request) {
         announcements: [...currentLibrary.announcements, nextAnnouncement],
       });
 
+      return jsonResponse(updatedLibrary);
+    }
+
+    if (action === 'update-announcement') {
+      const submitted = body.announcement;
+      const previous = currentLibrary.announcements.find((item) => item.id === submitted?.id);
+      if (!previous) {
+        return jsonResponse({ error: 'Announcement tidak ditemukan.' }, 404);
+      }
+      const nextAnnouncement = normalizeAnnouncement({
+        ...previous,
+        ...submitted,
+        id: previous.id,
+        enabled: previous.enabled,
+        createdAt: previous.createdAt,
+      });
+      if (!nextAnnouncement) {
+        return jsonResponse({ error: 'Announcement metadata tidak valid.' }, 400);
+      }
+      const updatedLibrary = await writeLibrary({
+        ...currentLibrary,
+        announcements: currentLibrary.announcements.map((item) =>
+          item.id === previous.id ? nextAnnouncement : item
+        ),
+      });
       return jsonResponse(updatedLibrary);
     }
 
