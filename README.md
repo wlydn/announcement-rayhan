@@ -6,7 +6,7 @@ Website Next.js untuk:
 - upload backsound standby ke Vercel Blob Storage
 - pause backsound otomatis saat announcement diputar
 - pause backsound otomatis saat masuk waktu sholat
-- auto ambil jadwal sholat dari API berdasarkan koordinat browser
+- auto ambil jadwal sholat resmi Kemenag RI dari API MyQuran berdasarkan kota/kabupaten
 - koreksi manual jadwal sholat dengan offset menit per waktu (`-60` sampai `+60`)
 - menahan announcement yang jatuh di waktu sholat lalu memutarnya setelah jeda selesai
 - siap deploy ke Vercel
@@ -17,7 +17,7 @@ Website Next.js untuk:
 - **Penyimpanan file audio di Vercel Blob Storage** (cloud-based)
 - Metadata audio bersama disimpan di Vercel Blob agar bisa dibuka dari browser/perangkat lain
 - Konfigurasi jadwal sholat dan preferensi lokal disimpan di localStorage
-- Pengambilan jadwal sholat melalui API AlAdhan dari sisi client
+- Pengambilan jadwal sholat melalui API MyQuran (`api.myquran.com/v2/sholat`, data Kemenag RI) dari sisi client
 - API Routes untuk token upload Blob dan delete audio files
 
 ## Perubahan Utama (v2)
@@ -57,17 +57,29 @@ Buka `http://localhost:3000`
 3. Upload file backsound standby (akan di-upload ke Vercel Blob).
 4. Buka panel **Jadwal Sholat**.
 5. Pilih mode **Otomatis dari API**.
-6. Klik **Ambil Lokasi Browser** atau isi koordinat manual.
-7. Klik **Refresh dari API** jika ingin sinkron ulang.
+6. Ketik nama kota/kabupaten (min. 3 huruf), klik **Cari**, lalu pilih kota dari hasil pencarian.
+7. Klik **Refresh API** jika ingin sinkron ulang (jadwal otomatis diperbarui setiap ganti hari).
 8. Koreksi jam sholat bila perlu menggunakan offset menit per Subuh / Dzuhur / Ashar / Maghrib / Isya.
 9. Tambahkan announcement: judul, jam, dan file audio (akan di-upload ke Vercel Blob).
 
 ## Catatan penting
-- Jika izin lokasi browser ditolak, Anda tetap bisa isi `latitude` dan `longitude` manual.
+- Jadwal MyQuran sudah termasuk ihtiyath Kemenag, jadi offset menit biasanya cukup `0`.
 - Jika ingin sepenuhnya manual, ubah mode ke **Manual** lalu isi jam sholat langsung.
 - File audio disimpan di Vercel Blob. Metadata audio utama dibaca dari shared storage, sedangkan jadwal sholat dan preferensi lokal tetap ada di `localStorage` browser.
 - Jika dibuka di perangkat lain, backsound aktif, daftar announcement, dan jadwal backsound tetap ikut termuat, tetapi pengaturan lokal seperti volume, unlock audio, dan jadwal sholat lokal tetap mengikuti browser tersebut.
 - Browser modern membatasi autoplay. Tombol **Aktifkan Audio** memang wajib diklik sekali setelah halaman dibuka.
+
+## Adzan otomatis
+- Adzan hanya diputar dari **URL** (tidak ada file lokal). Isi di panel **Adzan**, lalu klik **Simpan**:
+  - **URL adzan biasa** untuk Dzuhur, Ashar, Maghrib, dan Isya
+  - **URL adzan Subuh** untuk Subuh
+  - Contoh Subuh: `https://islamdownload.net/r/123801/fajr_128_44.mp3`
+- URL disimpan di shared storage (Vercel Blob, `config/audio-library.json`), jadi cukup diisi sekali dan berlaku di semua browser/perangkat. Jika URL kosong, adzan untuk jenis itu tidak diputar dan muncul peringatan di status.
+- File di-preload saat halaman dibuka dan dimuat ulang 2 menit sebelum waktu sholat (warm-up). Aplikasi bergantung pada internet dan server pemilik URL; jika URL mati atau dipindah, adzan gagal dan status akan menampilkan "gagal dimuat".
+- Saat masuk waktu sholat, backsound/announcement dijeda, adzan diputar, lalu jeda sholat berjalan seperti biasa. Announcement yang terpotong akan dilanjutkan setelah adzan selesai.
+- Setiap sholat hanya diputar sekali per hari, tercatat di `localStorage`. Jika halaman baru dibuka lebih dari 2 menit setelah jam sholat, adzan tidak diputar.
+- Di panel **Adzan** ada toggle per sholat, pengaturan volume, tombol **Tes Adzan** / **Tes Adzan Subuh**, dan **Stop Adzan**. **Stop Audio** juga menghentikan adzan.
+
 
 ## Struktur singkat
 ```text

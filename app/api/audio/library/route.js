@@ -1,4 +1,5 @@
 import { head, put } from '@vercel/blob';
+import { forbiddenResponse, isSameOriginRequest } from '../../../../lib/request-guard';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -13,11 +14,36 @@ const DEFAULT_BACKGROUND_SCHEDULE = {
 let cachedLibrary = null;
 let cachedLibraryExpiresAt = 0;
 
+const DEFAULT_ADZAN_URLS = {
+  normal: '',
+  subuh: '',
+};
+
 function createDefaultLibrary() {
   return {
     background: null,
     announcements: [],
     backgroundSchedule: DEFAULT_BACKGROUND_SCHEDULE,
+    adzan: DEFAULT_ADZAN_URLS,
+  };
+}
+
+function normalizeAdzanUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function normalizeAdzan(adzan) {
+  return {
+    normal: normalizeAdzanUrl(adzan?.normal),
+    subuh: normalizeAdzanUrl(adzan?.subuh),
   };
 }
 
@@ -25,44 +51,80 @@ function jsonResponse(payload, status = 200) {
   return Response.json(payload, {
     status,
     headers: {
-      'Access-Control-Allow-Origin': '*',
       'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
     },
   });
 }
 
+const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
+const MAX_TITLE_LENGTH = 120;
+const MAX_ANNOUNCEMENTS = 200;
+
+// File audio hanya boleh berasal dari Vercel Blob (https) dan berada di folder audio/
+function normalizeBlobFileUrl(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    if (parsed.protocol !== 'https:') return '';
+    if (!parsed.hostname.endsWith('.public.blob.vercel-storage.com')) return '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function isSafeBlobId(value) {
+  const id = String(value || '');
+  return id.startsWith('audio/') && !id.includes('..') && !id.includes('\\') && id.length <= 300;
+}
+
 function normalizeBackground(background) {
-  if (!background?.blobId || !background?.fileUrl) {
+  const fileUrl = normalizeBlobFileUrl(background?.fileUrl);
+
+  if (!isSafeBlobId(background?.blobId) || !fileUrl) {
     return null;
   }
 
   return {
     blobId: String(background.blobId),
-    fileUrl: String(background.fileUrl),
-    name: String(background.name || ''),
+    fileUrl,
+    name: String(background.name || '').slice(0, 200),
     uploadedAt: Number(background.uploadedAt || Date.now()),
   };
 }
 
 function normalizeAnnouncement(announcement) {
+  const fileUrl = normalizeBlobFileUrl(announcement?.fileUrl);
+  const title = String(announcement?.title || '').trim().slice(0, MAX_TITLE_LENGTH);
+
   if (
     !announcement?.id ||
-    !announcement?.title ||
-    !announcement?.time ||
-    !announcement?.blobId ||
-    !announcement?.fileUrl
+    !title ||
+    !TIME_PATTERN.test(String(announcement?.time || '')) ||
+    !isSafeBlobId(announcement?.blobId) ||
+    !fileUrl
   ) {
     return null;
   }
 
-  const repeatCount = Math.max(1, Number.parseInt(announcement.repeatCount, 10) || 1);
+  const repeatCount = Math.min(20, Math.max(1, Number.parseInt(announcement.repeatCount, 10) || 1));
+
+  // Pengulangan berkala: putar tiap N menit dari `time` sampai `endTime` (hari yang sama).
+  // intervalMinutes 0 = hanya sekali pada `time`.
+  const endTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(announcement.endTime || ''))
+    ? String(announcement.endTime)
+    : '';
+  const requestedInterval = Math.max(0, Number.parseInt(announcement.intervalMinutes, 10) || 0);
+  const intervalMinutes = requestedInterval > 0 && endTime && endTime >= String(announcement.time) ? requestedInterval : 0;
 
   return {
-    id: String(announcement.id),
-    title: String(announcement.title).trim(),
+    id: String(announcement.id).slice(0, 100),
+    title,
     time: String(announcement.time),
+    intervalMinutes,
+    endTime: intervalMinutes > 0 ? endTime : '',
     blobId: String(announcement.blobId),
-    fileUrl: String(announcement.fileUrl),
+    fileUrl,
     enabled: announcement.enabled !== false,
     repeatCount,
     createdAt: Number(announcement.createdAt || Date.now()),
@@ -96,6 +158,7 @@ function normalizeLibrary(data) {
           .sort((a, b) => a.time.localeCompare(b.time))
       : base.announcements,
     backgroundSchedule: normalizeBackgroundSchedule(data?.backgroundSchedule),
+    adzan: normalizeAdzan(data?.adzan),
   };
 }
 
@@ -160,6 +223,8 @@ async function writeLibrary(library) {
   await put(CONFIG_PATH, JSON.stringify(normalized, null, 2), {
     access: 'public',
     addRandomSuffix: false,
+    // @vercel/blob 2.x menolak menimpa file yang ada tanpa opsi ini; config memang selalu ditimpa
+    allowOverwrite: true,
     contentType: 'application/json',
     cacheControlMaxAge: 0,
   });
@@ -178,6 +243,10 @@ export async function GET() {
 }
 
 export async function POST(request) {
+  if (!isSameOriginRequest(request)) {
+    return forbiddenResponse();
+  }
+
   try {
     const body = await request.json();
     const action = body?.action;
@@ -214,11 +283,41 @@ export async function POST(request) {
       return jsonResponse(updatedLibrary);
     }
 
+    if (action === 'set-adzan-urls') {
+      const submitted = body.adzan || {};
+      const nextAdzan = { ...currentLibrary.adzan };
+
+      // Hanya field yang dikirim yang diubah, supaya update Subuh tidak menimpa URL biasa
+      for (const type of ['normal', 'subuh']) {
+        if (!(type in submitted)) continue;
+
+        const rawValue = String(submitted[type] || '').trim();
+        const normalizedValue = normalizeAdzanUrl(rawValue);
+
+        if (rawValue && !normalizedValue) {
+          return jsonResponse({ error: 'URL adzan tidak valid. Gunakan alamat http:// atau https://' }, 400);
+        }
+
+        nextAdzan[type] = normalizedValue;
+      }
+
+      const updatedLibrary = await writeLibrary({
+        ...currentLibrary,
+        adzan: nextAdzan,
+      });
+
+      return jsonResponse(updatedLibrary);
+    }
+
     if (action === 'add-announcement') {
       const nextAnnouncement = normalizeAnnouncement(body.announcement);
 
       if (!nextAnnouncement) {
         return jsonResponse({ error: 'Announcement metadata tidak valid.' }, 400);
+      }
+
+      if (currentLibrary.announcements.length >= MAX_ANNOUNCEMENTS) {
+        return jsonResponse({ error: 'Jumlah announcement sudah mencapai batas.' }, 400);
       }
 
       const updatedLibrary = await writeLibrary({
@@ -266,18 +365,6 @@ export async function POST(request) {
     return jsonResponse({ error: 'Action tidak valid.' }, 400);
   } catch (error) {
     console.error('Failed to update shared audio config:', error);
-    return jsonResponse({ error: error.message || 'Failed to update shared audio config.' }, 500);
+    return jsonResponse({ error: 'Failed to update shared audio config.' }, 500);
   }
-}
-
-export async function OPTIONS() {
-  return new Response(null, {
-    status: 200,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Cache-Control': 'no-store',
-    },
-  });
 }

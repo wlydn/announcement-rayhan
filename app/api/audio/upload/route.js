@@ -1,6 +1,7 @@
 import { handleUpload } from '@vercel/blob/client';
 import { NextResponse } from 'next/server';
 import { AUDIO_CONTENT_TYPES, MAX_AUDIO_SIZE } from '../../../../lib/audio-upload';
+import { forbiddenResponse, isSameOriginRequest } from '../../../../lib/request-guard';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -23,6 +24,13 @@ function isSafeAudioPath(pathname) {
 export async function POST(request) {
   try {
     const body = await request.json();
+
+    // Pembuatan token upload hanya boleh dari halaman ini sendiri. Callback
+    // 'blob.upload-completed' datang dari server Vercel Blob dan tanda tangannya
+    // diverifikasi oleh handleUpload, jadi tidak diblokir oleh pemeriksaan asal.
+    if (body?.type !== 'blob.upload-completed' && !isSameOriginRequest(request)) {
+      return forbiddenResponse();
+    }
 
     const jsonResponse = await handleUpload({
       body,
@@ -83,11 +91,7 @@ export async function POST(request) {
       {
         error: error.message || 'Upload token generation failed.',
       },
-      { status: 400 }
+      { status: 400, headers: { 'Cache-Control': 'no-store' } }
     );
   }
-}
-
-export async function OPTIONS() {
-  return new NextResponse(null, { status: 200 });
 }

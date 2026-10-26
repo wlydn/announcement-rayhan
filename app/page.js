@@ -7,6 +7,7 @@ import {
   deleteSharedAnnouncement,
   getSharedAudioConfig,
   setSharedBackground,
+  setSharedAdzanUrls,
   setSharedBackgroundSchedule,
   toggleSharedAnnouncement,
 } from '../lib/audio-config';
@@ -29,12 +30,11 @@ const DEFAULT_PRAYER_OFFSETS = {
 
 const DEFAULT_PRAYER_CONFIG = {
   mode: 'auto',
-  method: 20,
-  latitude: '',
-  longitude: '',
-  locationLabel: '',
-  useBrowserLocation: true,
+  cityId: '',
+  cityName: '',
 };
+
+const MYQURAN_API_BASE = 'https://api.myquran.com/v2/sholat';
 
 const DEFAULT_PRAYER_API_CACHE = {
   dateKey: '',
@@ -45,6 +45,31 @@ const DEFAULT_PRAYER_API_CACHE = {
   timings: DEFAULT_PRAYER_TIMES,
 };
 
+// Sumber adzan hanya dari URL (disimpan di penyimpanan bersama/server). Tidak ada file lokal.
+// 'normal' = Dzuhur, Ashar, Maghrib, Isya. 'subuh' = Subuh.
+const ADZAN_TYPES = ['normal', 'subuh'];
+
+// Adzan hanya diputar jika halaman aktif maksimal N menit setelah jam sholat.
+// Mencegah adzan terputar terlambat saat halaman baru dibuka di tengah waktu sholat.
+const ADZAN_LATE_TOLERANCE_MINUTES = 2;
+
+const DEFAULT_ADZAN_SETTINGS = {
+  enabled: true,
+  volume: 1,
+  // URL file adzan. Jika kosong, adzan untuk jenis tersebut tidak diputar.
+  urls: {
+    normal: '',
+    subuh: '',
+  },
+  prayers: {
+    subuh: true,
+    dzuhur: true,
+    ashar: true,
+    maghrib: true,
+    isya: true,
+  },
+};
+
 const DEFAULT_BACKGROUND_SCHEDULE = {
   startTime: '00:00',
   endTime: '23:59',
@@ -53,23 +78,16 @@ const DEFAULT_BACKGROUND_SCHEDULE = {
 const STORAGE_KEYS = {
   manualPrayerTimes: 'app-prayer-times-v2',
   prayerPauseMinutes: 'app-prayer-pause-minutes-v1',
-  prayerOffsets: 'app-prayer-offsets-v2',
-  prayerConfig: 'app-prayer-config-v2',
-  prayerApiCache: 'app-prayer-api-cache-v2',
+  prayerOffsets: 'app-prayer-offsets-v3',
+  prayerConfig: 'app-prayer-config-v3',
+  prayerApiCache: 'app-prayer-api-cache-v3',
+  adzanSettings: 'app-adzan-settings-v1',
+  adzanPlayedLog: 'app-adzan-played-v1',
   settings: 'app-settings-v1',
 };
 
 const SHARED_AUDIO_SYNC_INTERVAL_MS = 30 * 60 * 1000;
 const SHARED_AUDIO_SYNC_MIN_GAP_MS = 30 * 1000;
-
-const PRAYER_METHOD_OPTIONS = [
-  { value: 20, label: 'Kementerian Agama RI (default)' },
-  { value: 11, label: 'Singapore / Muis' },
-  { value: 17, label: 'JAKIM Malaysia' },
-  { value: 3, label: 'Umm Al-Qura Makkah' },
-  { value: 4, label: 'Karachi' },
-  { value: 8, label: 'Gulf Region' },
-];
 
 function pad(value) {
   return String(value).padStart(2, '0');
@@ -146,6 +164,41 @@ function isNowInsidePrayerWindow(prayerTimes, pauseMinutes, now = new Date()) {
   };
 }
 
+function isValidAudioUrl(value) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch (e) {
+    return false;
+  }
+}
+
+function getAdzanSrc(adzanSettings, type) {
+  const url = String(adzanSettings?.urls?.[type] || '').trim();
+  return url && isValidAudioUrl(url) ? url : undefined;
+}
+
+function getAdzanFileType(prayerName) {
+  return prayerName === 'subuh' ? 'subuh' : 'normal';
+}
+
+function findDueAdzanPrayer(prayerTimes, adzanSettings, playedPrayers, now = new Date()) {
+  if (!adzanSettings?.enabled) return null;
+  const minutesNow = now.getHours() * 60 + now.getMinutes();
+
+  for (const [name, time] of Object.entries(prayerTimes)) {
+    if (!adzanSettings.prayers?.[name]) continue;
+    if (playedPrayers.includes(name)) continue;
+
+    const start = timeToMinutes(time);
+    if (minutesNow >= start && minutesNow < start + ADZAN_LATE_TOLERANCE_MINUTES) {
+      return name;
+    }
+  }
+
+  return null;
+}
+
 function isNowInsideBackgroundWindow(startTime, endTime, now = new Date()) {
   const minutesNow = now.getHours() * 60 + now.getMinutes();
   const start = timeToMinutes(startTime);
@@ -207,12 +260,78 @@ function getAnnouncementRepeatCount(item) {
   return Math.max(1, Number.parseInt(item?.repeatCount, 10) || 1);
 }
 
+function getAnnouncementInterval(item) {
+  const intervalMinutes = Math.max(0, Number.parseInt(item?.intervalMinutes, 10) || 0);
+  const endTime = String(item?.endTime || '');
+  if (intervalMinutes <= 0 || !endTime) return null;
+  return { intervalMinutes, endTime };
+}
+
+// Apakah announcement jatuh tempo pada menit ini (untuk jadwal sekali maupun berkala)
+function isAnnouncementDueNow(item, now) {
+  const currentHHMM = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const interval = getAnnouncementInterval(item);
+
+  if (!interval) return item.time === currentHHMM;
+
+  const minutesNow = now.getHours() * 60 + now.getMinutes();
+  const start = timeToMinutes(item.time);
+  const end = timeToMinutes(interval.endTime);
+  if (minutesNow < start || minutesNow > end) return false;
+  return (minutesNow - start) % interval.intervalMinutes === 0;
+}
+
+// Format selisih menit menjadi teks singkat, mis. "1j 20m" / "45m"
+function formatDuration(totalMinutes) {
+  const minutes = Math.max(0, Math.round(totalMinutes));
+  if (minutes < 1) return 'kurang dari 1 menit';
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (!hours) return `${rest}m`;
+  return rest ? `${hours}j ${rest}m` : `${hours}j`;
+}
+
+// Berapa menit lagi announcement ini berikutnya diputar (jadwal sekali maupun berkala)
+function getMinutesUntilNextRun(item, nowMinutes) {
+  const start = timeToMinutes(item.time);
+  const interval = getAnnouncementInterval(item);
+
+  if (!interval) {
+    return start > nowMinutes ? start - nowMinutes : 1440 - nowMinutes + start;
+  }
+
+  if (nowMinutes < start) return start - nowMinutes;
+
+  const end = timeToMinutes(interval.endTime);
+  const nextSlot = start + (Math.floor((nowMinutes - start) / interval.intervalMinutes) + 1) * interval.intervalMinutes;
+  if (nextSlot <= end) return nextSlot - nowMinutes;
+  return 1440 - nowMinutes + start;
+}
+
+const STATUS_TYPE_LABELS = {
+  info: 'Info',
+  success: 'Berhasil',
+  warning: 'Peringatan',
+  error: 'Gagal',
+};
+
+// Buang penanda tes manual untuk ID yang sudah tidak ada di antrian
+function pruneManualTestIds(idSet, queue, activeId) {
+  Array.from(idSet).forEach((id) => {
+    if (id !== activeId && !queue.includes(id)) idSet.delete(id);
+  });
+}
+
 function createAnnouncementQueueEntries(item, repeatCount = getAnnouncementRepeatCount(item)) {
   return Array.from({ length: repeatCount }, () => item.id);
 }
 
 function getSharedAudioConfigSignature(sharedAudioConfig) {
   return JSON.stringify({
+    adzan: {
+      normal: String(sharedAudioConfig?.adzan?.normal || ''),
+      subuh: String(sharedAudioConfig?.adzan?.subuh || ''),
+    },
     background: sharedAudioConfig?.background
       ? {
           blobId: String(sharedAudioConfig.background.blobId || ''),
@@ -224,6 +343,8 @@ function getSharedAudioConfigSignature(sharedAudioConfig) {
       ? sharedAudioConfig.announcements.map((item) => ({
           id: String(item.id || ''),
           time: String(item.time || ''),
+          intervalMinutes: Number(item.intervalMinutes || 0),
+          endTime: String(item.endTime || ''),
           blobId: String(item.blobId || ''),
           fileUrl: String(item.fileUrl || ''),
           enabled: item.enabled !== false,
@@ -254,14 +375,14 @@ function formatOffsetLabel(value) {
   return `${number > 0 ? '+' : ''}${number} menit`;
 }
 
-function getPrayerMethodLabel(method) {
-  return PRAYER_METHOD_OPTIONS.find((item) => item.value === Number(method))?.label || `Method ${method}`;
+function hasValidCity(config) {
+  return /^\d{3,5}$/.test(String(config?.cityId || '').trim());
 }
 
-function hasValidCoordinates(config) {
-  const lat = Number(config.latitude);
-  const lng = Number(config.longitude);
-  return Number.isFinite(lat) && Number.isFinite(lng);
+function toTitleCase(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 export default function Page() {
@@ -276,6 +397,15 @@ export default function Page() {
   const [prayerConfig, setPrayerConfig] = useState(DEFAULT_PRAYER_CONFIG);
   const [prayerApiCache, setPrayerApiCache] = useState(DEFAULT_PRAYER_API_CACHE);
   const [prayerLoading, setPrayerLoading] = useState(false);
+  const [citySearchQuery, setCitySearchQuery] = useState('');
+  const [citySearchResults, setCitySearchResults] = useState([]);
+  const [citySearchLoading, setCitySearchLoading] = useState(false);
+
+  const [adzanSettings, setAdzanSettings] = useState(DEFAULT_ADZAN_SETTINGS);
+  const [adzanPlayedLog, setAdzanPlayedLog] = useState({ dateKey: '', prayers: [] });
+  const [adzanPlaying, setAdzanPlaying] = useState(null); // { prayerName, type, isTest } | null
+  const [adzanFileStatus, setAdzanFileStatus] = useState({ normal: 'loading', subuh: 'loading' });
+  const [adzanUrlDrafts, setAdzanUrlDrafts] = useState({ normal: '', subuh: '' });
 
   const [backgroundMeta, setBackgroundMeta] = useState(null);
   const [backgroundUrl, setBackgroundUrl] = useState('');
@@ -293,6 +423,9 @@ export default function Page() {
   const [newAnnouncementTitle, setNewAnnouncementTitle] = useState('');
   const [newAnnouncementTime, setNewAnnouncementTime] = useState('08:00');
   const [newAnnouncementRepeatCount, setNewAnnouncementRepeatCount] = useState(1);
+  const [newAnnouncementPeriodic, setNewAnnouncementPeriodic] = useState(false);
+  const [newAnnouncementInterval, setNewAnnouncementInterval] = useState(15);
+  const [newAnnouncementEndTime, setNewAnnouncementEndTime] = useState('15:00');
   const [newAnnouncementFileName, setNewAnnouncementFileName] = useState('');
   const [showAnnouncementModal, setShowAnnouncementModal] = useState(false);
   const [showPrayerModal, setShowPrayerModal] = useState(false);
@@ -304,9 +437,16 @@ export default function Page() {
   const pendingPlayAfterUnlockRef = useRef(false);
   const isStoppingRef = useRef(false); // Track if we're intentionally stopping audio
   const lastTickMinuteRef = useRef('');
-  const attemptedInitialLocationRef = useRef(false);
+  const citySearchRequestRef = useRef(0);
+  const adzanNormalAudioRef = useRef(null);
+  const adzanSubuhAudioRef = useRef(null);
+  const adzanPlayingRef = useRef(null);
+  const adzanAttemptRef = useRef('');
+  const adzanWarmupRef = useRef('');
   const activeAnnouncementIdRef = useRef(null);
   const announcementBusyRef = useRef(false);
+  // ID announcement yang diputar manual (tombol Putar) walau jadwalnya sedang Off
+  const manualTestIdsRef = useRef(new Set());
   const sharedAudioSignatureRef = useRef('');
   const sharedAudioSyncInFlightRef = useRef(false);
   const lastSharedAudioSyncAtRef = useRef(0);
@@ -331,14 +471,19 @@ export default function Page() {
 
   const backgroundStatusLabel = useMemo(() => {
     if (!backgroundMeta?.name) return 'Tidak ada file';
-    if (!backgroundEnabled) return 'Nonaktif';
-    if (backgroundSchedulePhase === 'before_start') return 'Menunggu jadwal';
-    if (backgroundSchedulePhase === 'after_end') return 'Suara Berhenti (Jadwal Selesai)';
-    if (prayerState.active) return 'Dijeda (sholat)';
-    if (activeAnnouncementId) return 'Dijeda (Informasi)';
-    if (!audioReady) return 'Menunggu audio';
-    return '▶ Bermain';
-  }, [backgroundMeta, backgroundEnabled, backgroundSchedulePhase, prayerState.active, activeAnnouncementId, audioReady]);
+    if (!backgroundEnabled) return 'Dimatikan (switch backsound off)';
+    if (backgroundSchedulePhase === 'before_start') return `Menunggu jadwal mulai ${backgroundStartTime}`;
+    if (backgroundSchedulePhase === 'after_end') return `Berhenti - jadwal selesai ${backgroundEndTime}`;
+    if (adzanPlaying) return 'Dijeda - adzan sedang berkumandang';
+    if (prayerState.active) return `Dijeda - waktu sholat ${toPrayerLabel(prayerState.prayerName)}`;
+    if (activeAnnouncementId) return 'Dijeda - announcement sedang diputar';
+    if (!audioReady) return 'Menunggu audio diaktifkan';
+    return '▶ Bermain (standby)';
+  }, [backgroundMeta, backgroundEnabled, backgroundSchedulePhase, backgroundStartTime, backgroundEndTime, adzanPlaying, prayerState.active, prayerState.prayerName, activeAnnouncementId, audioReady]);
+
+  const adzanPlayedToday = adzanPlayedLog.dateKey === todayKey ? adzanPlayedLog.prayers : [];
+  const adzanNormalSrc = getAdzanSrc(adzanSettings, 'normal');
+  const adzanSubuhSrc = getAdzanSrc(adzanSettings, 'subuh');
 
   const nextAnnouncements = useMemo(() => {
     const nowMinutes = now.getHours() * 60 + now.getMinutes();
@@ -353,6 +498,129 @@ export default function Page() {
       .sort((a, b) => a.diff - b.diff)
       .slice(0, 5);
   }, [announcements, now]);
+
+  // Sholat berikutnya (hanya yang adzannya aktif jika adzan otomatis dinyalakan)
+  const nextPrayerInfo = useMemo(() => {
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    const candidates = Object.entries(effectivePrayerTimes)
+      .filter(([key]) => !adzanSettings.enabled || adzanSettings.prayers?.[key])
+      .map(([key, time]) => {
+        const minutes = timeToMinutes(time);
+        return { key, time, inMinutes: minutes > nowMinutes ? minutes - nowMinutes : 1440 - nowMinutes + minutes };
+      })
+      .sort((a, b) => a.inMinutes - b.inMinutes);
+    return candidates[0] || null;
+  }, [effectivePrayerTimes, adzanSettings, now]);
+
+  // Announcement aktif berikutnya yang akan diputar sesuai jadwal
+  const nextAnnouncementInfo = useMemo(() => {
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    const candidates = announcements
+      .filter((item) => item.enabled)
+      .map((item) => ({ item, inMinutes: getMinutesUntilNextRun(item, nowMinutes) }))
+      .sort((a, b) => a.inMinutes - b.inMinutes);
+    return candidates[0] || null;
+  }, [announcements, now]);
+
+  // Item pertama antrian adalah announcement yang sedang diputar, jadi tidak dihitung "menunggu"
+  const waitingQueueCount = Math.max(0, pendingQueue.length - (activeAnnouncementId ? 1 : 0));
+
+  // Kondisi sistem saat ini, dalam bahasa yang mudah dipahami. Urutan = prioritas.
+  const monitorState = useMemo(() => {
+    const pauseEnd = prayerState.active ? minutesToTime(prayerState.end) : '';
+    const queueNote = waitingQueueCount ? ` ${waitingQueueCount} item antrian menunggu giliran.` : '';
+
+    if (adzanPlaying) {
+      if (adzanPlaying.isTest) {
+        return {
+          tone: 'adzan',
+          title: 'TES ADZAN SEDANG DIPUTAR',
+          detail: 'Ini hanya tes manual. Backsound dan announcement dijeda sementara, lalu lanjut otomatis setelah tes selesai.',
+        };
+      }
+      return {
+        tone: 'adzan',
+        title: `ADZAN ${toPrayerLabel(adzanPlaying.prayerName).toUpperCase()} SEDANG BERKUMANDANG`,
+        detail: `Backsound dan announcement dijeda otomatis.${pauseEnd ? ` Setelah adzan selesai, jeda sholat tetap berlaku sampai ${pauseEnd}.` : ''}${queueNote}`,
+      };
+    }
+
+    if (prayerState.active) {
+      return {
+        tone: 'sholat',
+        title: `JEDA WAKTU SHOLAT ${toPrayerLabel(prayerState.prayerName).toUpperCase()}`,
+        detail: `Adzan sudah selesai atau tidak diputar. Backsound dan announcement ditahan sampai ${pauseEnd}, lalu otomatis lanjut.${queueNote}`,
+      };
+    }
+
+    if (activeAnnouncementId) {
+      const title = announcements.find((item) => item.id === activeAnnouncementId)?.title || 'Announcement';
+      return {
+        tone: 'announcement',
+        title: 'ANNOUNCEMENT SEDANG DIPUTAR',
+        detail: `"${title}" sedang diputar. Backsound dijeda sementara dan lanjut otomatis setelah selesai.${queueNote}`,
+      };
+    }
+
+    if (!audioReady) {
+      return {
+        tone: 'idle',
+        title: 'AUDIO BELUM AKTIF',
+        detail: 'Klik "Aktifkan Audio" agar browser mengizinkan suara. Selama belum aktif, backsound, announcement, dan adzan tidak akan terdengar.',
+      };
+    }
+
+    const nextAdzanNote = nextPrayerInfo
+      ? ` Sholat berikutnya: ${toPrayerLabel(nextPrayerInfo.key)} pukul ${nextPrayerInfo.time} (${formatDuration(nextPrayerInfo.inMinutes)} lagi).`
+      : '';
+
+    if (!backgroundMeta?.name) {
+      return {
+        tone: 'standby',
+        title: 'STANDBY - TANPA BACKSOUND',
+        detail: `Sistem siaga menunggu jadwal, tetapi belum ada file backsound.${nextAdzanNote}`,
+      };
+    }
+    if (!backgroundEnabled) {
+      return {
+        tone: 'standby',
+        title: 'STANDBY - BACKSOUND DIMATIKAN',
+        detail: `Sistem siaga, backsound sedang off. Announcement dan adzan tetap berjalan sesuai jadwal.${nextAdzanNote}`,
+      };
+    }
+    if (backgroundSchedulePhase === 'before_start') {
+      return {
+        tone: 'standby',
+        title: 'STANDBY - MENUNGGU JADWAL BACKSOUND',
+        detail: `Backsound mulai pukul ${backgroundStartTime}. Announcement dan adzan tetap berjalan sesuai jadwal.${nextAdzanNote}`,
+      };
+    }
+    if (backgroundSchedulePhase === 'after_end') {
+      return {
+        tone: 'standby',
+        title: 'STANDBY - JADWAL BACKSOUND SELESAI',
+        detail: `Backsound berhenti sejak pukul ${backgroundEndTime} dan mulai lagi pukul ${backgroundStartTime}. Announcement dan adzan tetap berjalan.${nextAdzanNote}`,
+      };
+    }
+    return {
+      tone: 'standby',
+      title: 'STANDBY - BACKSOUND BERMAIN',
+      detail: `Sistem siaga: backsound berputar sambil menunggu announcement atau adzan berikutnya.${nextAdzanNote}`,
+    };
+  }, [
+    adzanPlaying,
+    prayerState,
+    activeAnnouncementId,
+    announcements,
+    waitingQueueCount,
+    audioReady,
+    backgroundMeta,
+    backgroundEnabled,
+    backgroundSchedulePhase,
+    backgroundStartTime,
+    backgroundEndTime,
+    nextPrayerInfo,
+  ]);
 
   function pushStatus(message, type = 'info') {
     setStatus({ message, type });
@@ -382,6 +650,202 @@ export default function Page() {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(value));
   }
 
+  function persistAdzanSettings(value) {
+    localStorage.setItem(STORAGE_KEYS.adzanSettings, JSON.stringify(value));
+  }
+
+  function persistAdzanPlayedLog(value) {
+    localStorage.setItem(STORAGE_KEYS.adzanPlayedLog, JSON.stringify(value));
+  }
+
+  function getAdzanAudio(type) {
+    return type === 'subuh' ? adzanSubuhAudioRef.current : adzanNormalAudioRef.current;
+  }
+
+  function markAdzanPlayed(prayerName) {
+    setAdzanPlayedLog((prev) => {
+      const base = prev.dateKey === todayKey ? prev.prayers : [];
+      if (base.includes(prayerName)) return prev;
+      const next = { dateKey: todayKey, prayers: [...base, prayerName] };
+      persistAdzanPlayedLog(next);
+      return next;
+    });
+  }
+
+  async function playAdzan(prayerName, { isTest = false, type: forcedType } = {}) {
+    if (adzanPlayingRef.current) return { played: false, reason: 'busy' };
+
+    const type = forcedType || getAdzanFileType(prayerName);
+    const audio = getAdzanAudio(type);
+    if (!audio) return { played: false, reason: 'missing_element' };
+
+    if (!getAdzanSrc(adzanSettings, type)) {
+      pushStatus(
+        `URL adzan ${type === 'subuh' ? 'Subuh' : 'biasa'} belum diisi. Isi di panel Adzan agar adzan ${toPrayerLabel(prayerName)} bisa diputar.`,
+        'warning'
+      );
+      return { played: false, reason: 'no_url' };
+    }
+
+    if (adzanFileStatus[type] === 'missing') {
+      pushStatus(`URL adzan ${getAdzanSrc(adzanSettings, type)} tidak bisa dimuat. Adzan tidak diputar.`, 'error');
+      if (!isTest) markAdzanPlayed(prayerName);
+      return { played: false, reason: 'file_missing' };
+    }
+
+    // Adzan prioritas tertinggi: hentikan sementara backsound & announcement yang sedang jalan
+    pauseBackground();
+    const announcementAudio = announcementAudioRef.current;
+    const interruptedAnnouncement = Boolean(
+      announcementAudio && activeAnnouncementIdRef.current && !announcementAudio.paused
+    );
+    if (interruptedAnnouncement) announcementAudio.pause();
+
+    const playing = { prayerName, type, isTest, interruptedAnnouncement };
+    adzanPlayingRef.current = playing;
+    setAdzanPlaying(playing);
+
+    audio.loop = false;
+    audio.volume = adzanSettings.volume;
+    try {
+      audio.currentTime = 0;
+    } catch (e) {
+      // currentTime bisa gagal jika metadata belum termuat; abaikan
+    }
+
+    const result = await safelyPlay(audio);
+
+    if (!result.played) {
+      adzanPlayingRef.current = null;
+      setAdzanPlaying(null);
+      if (interruptedAnnouncement) await safelyPlay(announcementAudio);
+
+      if (result.reason === 'blocked') {
+        // Belum di-unlock: percobaan ulang dilakukan setelah "Aktifkan Audio" diklik (selama masih dalam toleransi)
+        pushStatus(`Adzan ${toPrayerLabel(prayerName)} tertahan autoplay browser. Klik "Aktifkan Audio".`, 'warning');
+      } else if (!isTest && result.reason === 'failed') {
+        markAdzanPlayed(prayerName);
+        pushStatus(`Adzan ${toPrayerLabel(prayerName)} gagal diputar. Periksa URL ${getAdzanSrc(adzanSettings, type)}.`, 'error');
+      }
+      return result;
+    }
+
+    if (!isTest) markAdzanPlayed(prayerName);
+    pushStatus(
+      isTest
+        ? `Tes adzan ${type === 'subuh' ? 'Subuh' : 'biasa'} sedang diputar.`
+        : `Adzan ${toPrayerLabel(prayerName)} sedang diputar.`,
+      'success'
+    );
+    return result;
+  }
+
+  async function finishAdzan(message) {
+    const playing = adzanPlayingRef.current;
+    if (!playing) return;
+
+    adzanPlayingRef.current = null;
+    setAdzanPlaying(null);
+
+    if (playing.interruptedAnnouncement && activeAnnouncementIdRef.current && announcementAudioRef.current) {
+      await safelyPlay(announcementAudioRef.current);
+      if (message) pushStatus(`${message} Announcement dilanjutkan.`, 'info');
+      return;
+    }
+
+    if (prayerState.active) {
+      if (message) pushStatus(`${message} Backsound tetap dijeda selama waktu ${toPrayerLabel(prayerState.prayerName)}.`, 'info');
+      return;
+    }
+
+    if (message) pushStatus(message, 'info');
+    await processQueueIfPossible();
+  }
+
+  async function handleAdzanEnded() {
+    const playing = adzanPlayingRef.current;
+    if (!playing) return;
+    await finishAdzan(playing.isTest ? 'Tes adzan selesai.' : `Adzan ${toPrayerLabel(playing.prayerName)} selesai.`);
+  }
+
+  async function stopAdzan() {
+    const playing = adzanPlayingRef.current;
+    if (!playing) return;
+    const audio = getAdzanAudio(playing.type);
+    if (audio) {
+      audio.pause();
+      try {
+        audio.currentTime = 0;
+      } catch (e) {
+        // abaikan
+      }
+    }
+    await finishAdzan('Adzan dihentikan.');
+  }
+
+  function handleAdzanFileReady(type) {
+    setAdzanFileStatus((prev) => (prev[type] === 'ready' ? prev : { ...prev, [type]: 'ready' }));
+  }
+
+  function handleAdzanFileError(type) {
+    if (isStoppingRef.current) return;
+    setAdzanFileStatus((prev) => (prev[type] === 'missing' ? prev : { ...prev, [type]: 'missing' }));
+
+    const playing = adzanPlayingRef.current;
+    if (playing && playing.type === type) {
+      pushStatus(`Adzan gagal diputar: URL ${getAdzanSrc(adzanSettings, type)} tidak bisa dimuat.`, 'error');
+      finishAdzan('').catch((err) => console.error('Failed to finish adzan after error:', err));
+    }
+  }
+
+  function handleAdzanSettingChange(patch) {
+    setAdzanSettings((prev) => {
+      const next = { ...prev, ...patch };
+      persistAdzanSettings(next);
+      return next;
+    });
+  }
+
+  async function handleSaveAdzanUrl(type) {
+    const value = String(adzanUrlDrafts[type] || '').trim();
+    if (value && !isValidAudioUrl(value)) {
+      pushStatus('URL adzan tidak valid. Gunakan alamat lengkap diawali https://', 'error');
+      return;
+    }
+    if (adzanPlayingRef.current?.type === type) {
+      pushStatus('Hentikan adzan yang sedang diputar sebelum mengganti URL.', 'warning');
+      return;
+    }
+
+    try {
+      // Simpan ke penyimpanan bersama (server) supaya berlaku di semua browser/perangkat
+      const sharedAudioConfig = await setSharedAdzanUrls({ [type]: value });
+      sharedAudioSignatureRef.current = getSharedAudioConfigSignature(sharedAudioConfig);
+      lastSharedAudioSyncAtRef.current = Date.now();
+      applySharedAudioConfig(sharedAudioConfig);
+    } catch (error) {
+      pushStatus(`Gagal menyimpan URL adzan: ${error.message}`, 'error');
+      return;
+    }
+
+    const label = type === 'subuh' ? 'Subuh' : 'biasa';
+    pushStatus(
+      value
+        ? `URL adzan ${label} disimpan. Memuat file...`
+        : `URL adzan ${label} dikosongkan. Adzan ${label} tidak akan diputar sampai URL diisi.`,
+      value ? 'info' : 'warning'
+    );
+  }
+
+  function handleAdzanPrayerToggle(prayerName, enabled) {
+    setAdzanSettings((prev) => {
+      const next = { ...prev, prayers: { ...prev.prayers, [prayerName]: enabled } };
+      persistAdzanSettings(next);
+      return next;
+    });
+  }
+
+
   function applySharedAudioConfig(sharedAudioConfig) {
     const nextBackground = sharedAudioConfig.background;
     const nextBackgroundStartTime =
@@ -393,6 +857,16 @@ export default function Page() {
     setAnnouncements((prev) => hydrateAnnouncements(sharedAudioConfig.announcements, prev));
     setBackgroundStartTime((prev) => (prev === nextBackgroundStartTime ? prev : nextBackgroundStartTime));
     setBackgroundEndTime((prev) => (prev === nextBackgroundEndTime ? prev : nextBackgroundEndTime));
+
+    if (sharedAudioConfig.adzan) {
+      const nextAdzanUrls = { ...DEFAULT_ADZAN_SETTINGS.urls, ...sharedAudioConfig.adzan };
+      setAdzanSettings((prev) => {
+        const prevUrls = { ...DEFAULT_ADZAN_SETTINGS.urls, ...(prev.urls || {}) };
+        const unchanged = Object.keys(nextAdzanUrls).every((key) => prevUrls[key] === nextAdzanUrls[key]);
+        return unchanged ? prev : { ...prev, urls: nextAdzanUrls };
+      });
+      setAdzanUrlDrafts(nextAdzanUrls);
+    }
   }
 
   useEffect(() => {
@@ -411,7 +885,9 @@ export default function Page() {
       }
 
       if (error.name === 'NotAllowedError') {
-        console.error(error);
+        // Kondisi normal sebelum ada klik pengguna, bukan error aplikasi. Pakai warn agar
+        // overlay error Next.js tidak muncul; pemutaran diulang otomatis setelah "Aktifkan Audio".
+        console.warn('Autoplay ditahan browser, menunggu "Aktifkan Audio".');
         pendingPlayAfterUnlockRef.current = true;
         setAudioReady(false);
         pushStatus('Browser menahan autoplay. Klik "Aktifkan Audio" untuk mengizinkan pemutaran.', 'warning');
@@ -439,6 +915,7 @@ export default function Page() {
 
     const updatedQueue = pendingQueue.slice(1);
     setPendingQueue(updatedQueue);
+    pruneManualTestIds(manualTestIdsRef.current, updatedQueue, null);
 
     pushStatus(reason, 'error');
 
@@ -474,6 +951,10 @@ export default function Page() {
       console.debug('resumeBackground blocked: prayer active');
       return;
     }
+    if (adzanPlayingRef.current) {
+      console.debug('resumeBackground blocked: adzan playing');
+      return;
+    }
     
     // Check if current time is within background schedule
     const isInSchedule = isNowInsideBackgroundWindow(backgroundStartTime, backgroundEndTime, now);
@@ -495,6 +976,10 @@ export default function Page() {
 
   async function playAnnouncementNow(item, triggerLabel = 'manual') {
     if (!item) return;
+    if (adzanPlayingRef.current) {
+      pushStatus('Adzan sedang diputar. Tunggu hingga selesai atau hentikan adzan terlebih dahulu.', 'warning');
+      return;
+    }
     if (announcementBusyRef.current) return;
     if (activeAnnouncementIdRef.current) return;
 
@@ -568,6 +1053,7 @@ export default function Page() {
   }
 
   async function processQueueIfPossible(queue = pendingQueue) {
+    if (adzanPlayingRef.current) return;
     if (prayerState.active) return;
     if (announcementBusyRef.current) return;
     if (activeAnnouncementIdRef.current) return;
@@ -579,7 +1065,7 @@ export default function Page() {
     const nextId = queue[0];
     const item = announcements.find((entry) => entry.id === nextId);
 
-    if (!item || !item.enabled) {
+    if (!item || (!item.enabled && !manualTestIdsRef.current.has(nextId))) {
       const updated = queue.slice(1);
       setPendingQueue(updated);
       if (updated.length) {
@@ -595,22 +1081,20 @@ export default function Page() {
 
   async function fetchPrayerTimesFromApi({ quiet = false, customConfig } = {}) {
     const config = customConfig || prayerConfig;
-    if (!hasValidCoordinates(config)) {
-      if (!quiet) pushStatus('Koordinat belum valid. Isi latitude dan longitude atau ambil dari lokasi browser.', 'error');
+    if (!hasValidCity(config)) {
+      if (!quiet) pushStatus('Kota belum dipilih. Cari dan pilih kota/kabupaten terlebih dahulu.', 'error');
       return false;
     }
 
-    const latitude = Number(config.latitude);
-    const longitude = Number(config.longitude);
-    const requestKey = `${todayKey}|${latitude.toFixed(6)}|${longitude.toFixed(6)}|${config.method}`;
+    const cityId = String(config.cityId).trim();
+    const requestKey = `${todayKey}|myquran|${cityId}`;
 
     setPrayerLoading(true);
 
     try {
       const [year, month, day] = todayKey.split('-');
-      const datePath = `${day}-${month}-${year}`;
-      const url = `https://api.aladhan.com/v1/timings/${datePath}?latitude=${latitude}&longitude=${longitude}&method=${config.method}`;
-      
+      const url = `${MYQURAN_API_BASE}/jadwal/${cityId}/${year}/${month}/${day}`;
+
       const response = await fetch(url, { cache: 'no-store' });
 
       if (!response.ok) {
@@ -620,26 +1104,25 @@ export default function Page() {
 
       const payload = await response.json();
       const data = payload?.data;
-      
-      if (!payload.data || !data.timings) {
-        throw new Error('Format data API tidak sesuai.');
+      const jadwal = data?.jadwal;
+
+      if (!payload?.status || !jadwal) {
+        throw new Error(payload?.message || 'Format data API tidak sesuai.');
       }
 
-      const timings = data.timings;
-
       const nextTimings = {
-        subuh: normalizeApiTime(timings.Fajr),
-        dzuhur: normalizeApiTime(timings.Dhuhr),
-        ashar: normalizeApiTime(timings.Asr),
-        maghrib: normalizeApiTime(timings.Maghrib),
-        isya: normalizeApiTime(timings.Isha),
+        subuh: normalizeApiTime(jadwal.subuh),
+        dzuhur: normalizeApiTime(jadwal.dzuhur),
+        ashar: normalizeApiTime(jadwal.ashar),
+        maghrib: normalizeApiTime(jadwal.maghrib),
+        isya: normalizeApiTime(jadwal.isya),
       };
 
       const nextCache = {
         dateKey: todayKey,
         fetchedAt: Date.now(),
-        source: config.locationLabel || `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`,
-        timezone: data?.meta?.timezone || '',
+        source: toTitleCase(data.lokasi || config.cityName || `ID ${cityId}`),
+        timezone: data.daerah ? toTitleCase(data.daerah) : '',
         requestKey,
         timings: nextTimings,
       };
@@ -647,7 +1130,7 @@ export default function Page() {
       setPrayerApiCache(nextCache);
       persistPrayerApiCache(nextCache);
       if (!quiet) {
-        pushStatus(`Jadwal sholat berhasil diambil dari API untuk ${nextCache.source}.`, 'success');
+        pushStatus(`Jadwal sholat (Kemenag via MyQuran) berhasil diambil untuk ${nextCache.source}.`, 'success');
       }
       return true;
     } catch (error) {
@@ -661,51 +1144,57 @@ export default function Page() {
     }
   }
 
-  async function requestBrowserLocation({ quiet = false, refreshAfter = true } = {}) {
-    if (typeof navigator === 'undefined' || !navigator.geolocation) {
-      if (!quiet) pushStatus('Browser ini tidak mendukung geolocation.', 'error');
-      return false;
+  async function searchPrayerCity(event) {
+    if (event) event.preventDefault();
+
+    const keyword = citySearchQuery.trim();
+    if (keyword.length < 3) {
+      pushStatus('Ketik minimal 3 huruf nama kota/kabupaten.', 'warning');
+      return;
     }
 
-    const position = await new Promise((resolve, reject) => {
-      navigator.geolocation.getCurrentPosition(resolve, reject, {
-        enableHighAccuracy: true,
-        timeout: 15000,
-        maximumAge: 300000,
-      });
-    }).catch((error) => {
-      console.error(error);
-      if (!quiet) {
-        pushStatus('Izin lokasi ditolak atau lokasi tidak tersedia. Isi koordinat manual jika diperlukan.', 'warning');
+    const requestId = citySearchRequestRef.current + 1;
+    citySearchRequestRef.current = requestId;
+    setCitySearchLoading(true);
+
+    try {
+      const url = `${MYQURAN_API_BASE}/kota/cari/${encodeURIComponent(keyword)}`;
+      const response = await fetch(url, { cache: 'no-store' });
+      const payload = await response.json().catch(() => null);
+      if (requestId !== citySearchRequestRef.current) return;
+
+      if (!payload?.status || !Array.isArray(payload.data) || payload.data.length === 0) {
+        setCitySearchResults([]);
+        pushStatus(`Kota/kabupaten "${keyword}" tidak ditemukan.`, 'warning');
+        return;
       }
-      return null;
-    });
 
-    if (!position) return false;
+      setCitySearchResults(payload.data);
+    } catch (error) {
+      console.error('Error searching city:', error);
+      if (requestId === citySearchRequestRef.current) {
+        pushStatus(`Gagal mencari kota: ${error.message}`, 'error');
+      }
+    } finally {
+      if (requestId === citySearchRequestRef.current) {
+        setCitySearchLoading(false);
+      }
+    }
+  }
 
-    const latitude = Number(position.coords.latitude).toFixed(6);
-    const longitude = Number(position.coords.longitude).toFixed(6);
-    const accuracy = Math.round(position.coords.accuracy || 0);
+  async function handleSelectPrayerCity(city) {
     const nextConfig = {
       ...prayerConfig,
-      latitude,
-      longitude,
-      locationLabel: accuracy > 0 ? `Lokasi browser (akurasi ±${accuracy} m)` : 'Lokasi browser',
-      useBrowserLocation: true,
+      cityId: String(city.id),
+      cityName: toTitleCase(city.lokasi),
     };
 
     setPrayerConfig(nextConfig);
     persistPrayerConfig(nextConfig);
+    setCitySearchResults([]);
+    setCitySearchQuery('');
 
-    if (!quiet) {
-      pushStatus(`Lokasi browser berhasil didapat: ${latitude}, ${longitude}.`, 'success');
-    }
-
-    if (refreshAfter) {
-      return fetchPrayerTimesFromApi({ quiet, customConfig: nextConfig });
-    }
-
-    return true;
+    return fetchPrayerTimesFromApi({ quiet: false, customConfig: nextConfig });
   }
 
   useEffect(() => {
@@ -734,15 +1223,14 @@ export default function Page() {
 
       if (savedPrayerConfig) {
         const parsed = JSON.parse(savedPrayerConfig);
-        const lat = Number(parsed.latitude);
-        const lng = Number(parsed.longitude);
+        const nextConfig = { ...DEFAULT_PRAYER_CONFIG, ...parsed };
 
-        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-          parsed.latitude = '';
-          parsed.longitude = '';
+        if (!hasValidCity(nextConfig)) {
+          nextConfig.cityId = '';
+          nextConfig.cityName = '';
         }
 
-        setPrayerConfig({ ...DEFAULT_PRAYER_CONFIG, ...parsed });
+        setPrayerConfig(nextConfig);
       }
 
       if (savedPrayerApiCache) {
@@ -755,6 +1243,28 @@ export default function Page() {
         if (typeof parsed.backgroundVolume === 'number') setBackgroundVolume(parsed.backgroundVolume);
         if (typeof parsed.announcementVolume === 'number') setAnnouncementVolume(parsed.announcementVolume);
       }
+
+      try {
+        const savedAdzanSettings = localStorage.getItem(STORAGE_KEYS.adzanSettings);
+        if (savedAdzanSettings) {
+          const parsed = JSON.parse(savedAdzanSettings);
+          setAdzanSettings({
+            ...DEFAULT_ADZAN_SETTINGS,
+            ...parsed,
+            prayers: { ...DEFAULT_ADZAN_SETTINGS.prayers, ...(parsed.prayers || {}) },
+            urls: { ...DEFAULT_ADZAN_SETTINGS.urls, ...(parsed.urls || {}) },
+          });
+          setAdzanUrlDrafts({ ...DEFAULT_ADZAN_SETTINGS.urls, ...(parsed.urls || {}) });
+        }
+        const savedAdzanPlayedLog = localStorage.getItem(STORAGE_KEYS.adzanPlayedLog);
+        if (savedAdzanPlayedLog) {
+          const parsed = JSON.parse(savedAdzanPlayedLog);
+          if (parsed && Array.isArray(parsed.prayers)) setAdzanPlayedLog(parsed);
+        }
+      } catch (adzanStorageError) {
+        console.warn('Failed to read adzan settings:', adzanStorageError);
+      }
+
       try {
         let sharedAudioConfig = await getSharedAudioConfig();
         if (cancelled) return;
@@ -775,6 +1285,28 @@ export default function Page() {
             console.warn('Failed to migrate legacy background schedule:', migrationError);
           }
         }
+        // Migrasi sekali: URL adzan lama di localStorage dipindah ke penyimpanan bersama (server)
+        try {
+          const adzanMigrationKey = 'app-adzan-urls-migrated-v1';
+          if (!localStorage.getItem(adzanMigrationKey)) {
+            const legacyUrls = JSON.parse(localStorage.getItem(STORAGE_KEYS.adzanSettings) || '{}').urls || {};
+            const migrationPatch = {};
+            for (const type of ADZAN_TYPES) {
+              const legacyUrl = String(legacyUrls[type] || '').trim();
+              if (legacyUrl && isValidAudioUrl(legacyUrl) && !sharedAudioConfig.adzan?.[type]) {
+                migrationPatch[type] = legacyUrl;
+              }
+            }
+            if (Object.keys(migrationPatch).length > 0) {
+              sharedAudioConfig = await setSharedAdzanUrls(migrationPatch);
+            }
+            localStorage.setItem(adzanMigrationKey, '1');
+          }
+        } catch (adzanMigrationError) {
+          console.warn('Failed to migrate adzan URLs:', adzanMigrationError);
+        }
+
+
 
         sharedAudioSignatureRef.current = getSharedAudioConfigSignature(sharedAudioConfig);
         lastSharedAudioSyncAtRef.current = Date.now();
@@ -831,12 +1363,19 @@ export default function Page() {
         applySharedAudioConfig(sharedAudioConfig);
         setPendingQueue((prev) =>
           prev.filter((queueId) =>
-            sharedAudioConfig.announcements?.some((item) => item.id === queueId && item.enabled !== false)
+            sharedAudioConfig.announcements?.some(
+              (item) => item.id === queueId && (item.enabled !== false || manualTestIdsRef.current.has(queueId))
+            )
           )
         );
 
         const activeId = activeAnnouncementIdRef.current;
-        if (activeId && !sharedAudioConfig.announcements?.some((item) => item.id === activeId && item.enabled !== false)) {
+        if (
+          activeId &&
+          !sharedAudioConfig.announcements?.some(
+            (item) => item.id === activeId && (item.enabled !== false || manualTestIdsRef.current.has(activeId))
+          )
+        ) {
           const audio = announcementAudioRef.current;
           if (audio) {
             announcementBusyRef.current = false;
@@ -1008,6 +1547,59 @@ export default function Page() {
   }, [announcementVolume]);
 
   useEffect(() => {
+    [adzanNormalAudioRef.current, adzanSubuhAudioRef.current].forEach((player) => {
+      if (player) player.volume = adzanSettings.volume;
+    });
+  }, [adzanSettings.volume]);
+
+  // Status file adzan dibaca dari event elemen <audio> (canplaythrough / error).
+  // Tidak memakai fetch/HEAD karena server eksternal umumnya tidak mengirim header CORS.
+  // Setiap kali sumber berubah, status di-reset ke 'loading' sampai audio siap/gagal.
+  useEffect(() => {
+    setAdzanFileStatus((prev) => ({ ...prev, normal: 'loading' }));
+  }, [adzanNormalSrc]);
+
+  useEffect(() => {
+    setAdzanFileStatus((prev) => ({ ...prev, subuh: 'loading' }));
+  }, [adzanSubuhSrc]);
+
+  // Setelah audio di-unlock, izinkan percobaan ulang adzan yang tadi tertahan autoplay
+  useEffect(() => {
+    if (audioReady) adzanAttemptRef.current = '';
+  }, [audioReady]);
+
+  // Pemicu adzan + warm-up buffer menjelang waktu sholat
+  useEffect(() => {
+    if (!bootstrapped) return;
+
+    // Warm-up: 2 menit sebelum waktu sholat, muat ulang buffer audio adzan
+    // (tab yang terbuka berjam-jam bisa membuang buffer preload)
+    const minutesNow = now.getHours() * 60 + now.getMinutes();
+    if (adzanSettings.enabled && !adzanPlayingRef.current) {
+      for (const [name, time] of Object.entries(effectivePrayerTimes)) {
+        if (!adzanSettings.prayers?.[name]) continue;
+        const diff = timeToMinutes(time) - minutesNow;
+        const warmupKey = `${todayKey}|${name}`;
+        if (diff > 0 && diff <= 2 && adzanWarmupRef.current !== warmupKey) {
+          adzanWarmupRef.current = warmupKey;
+          const audio = getAdzanAudio(getAdzanFileType(name));
+          if (audio && audio.paused && audio.getAttribute('src')) audio.load();
+        }
+      }
+    }
+
+    const duePrayer = findDueAdzanPrayer(effectivePrayerTimes, adzanSettings, adzanPlayedToday, now);
+    if (!duePrayer) return;
+
+    const attemptKey = `${todayKey}|${duePrayer}`;
+    if (adzanAttemptRef.current === attemptKey) return;
+    if (adzanPlayingRef.current) return;
+
+    adzanAttemptRef.current = attemptKey;
+    playAdzan(duePrayer).catch((err) => console.error('Failed to play adzan:', err));
+  }, [now, bootstrapped, effectivePrayerTimes, adzanSettings, adzanPlayedLog, todayKey]);
+
+  useEffect(() => {
     if (prayerState.active) {
       pauseBackground();
       if (!activeAnnouncementId) {
@@ -1026,6 +1618,7 @@ export default function Page() {
     }
 
     if (!audioReady) return;
+    if (adzanPlaying) return;
     if (prayerState.active) return;
     if (activeAnnouncementId) return;
     if (pendingQueue.length > 0) return;
@@ -1038,7 +1631,7 @@ export default function Page() {
     }
 
     resumeBackground();
-  }, [backgroundEnabled, audioReady, prayerState.active, activeAnnouncementId, pendingQueue.length, backgroundUrl, now, backgroundStartTime, backgroundEndTime]);
+  }, [backgroundEnabled, audioReady, adzanPlaying, prayerState.active, activeAnnouncementId, pendingQueue.length, backgroundUrl, now, backgroundStartTime, backgroundEndTime]);
 
   useEffect(() => {
     if (!audioReady) return;
@@ -1058,17 +1651,34 @@ export default function Page() {
 
     const currentHHMM = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
 
-    const dueItems = announcements.filter(
-      (item) => item.enabled && item.time === currentHHMM && item.lastTriggeredDate !== todayKey
+    // Announcement sekali: kunci per hari. Announcement berkala: kunci per slot menit.
+    const getTriggerKey = (item) => (getAnnouncementInterval(item) ? `${todayKey} ${currentHHMM}` : todayKey);
+
+    const allDueItems = announcements.filter(
+      (item) => item.enabled && isAnnouncementDueNow(item, now) && item.lastTriggeredDate !== getTriggerKey(item)
     );
 
-    if (!dueItems.length) return;
+    if (!allDueItems.length) return;
+
+    // Slot berkala yang jatuh saat jeda sholat / adzan dilewati (tidak diganti nanti)
+    const blockedNow = prayerState.active || Boolean(adzanPlayingRef.current);
+    const skippedItems = blockedNow ? allDueItems.filter((item) => getAnnouncementInterval(item)) : [];
+    const dueItems = allDueItems.filter((item) => !skippedItems.includes(item));
 
     const updatedAnnouncements = announcements.map((item) =>
-      dueItems.some((due) => due.id === item.id) ? { ...item, lastTriggeredDate: todayKey } : item
+      allDueItems.some((due) => due.id === item.id) ? { ...item, lastTriggeredDate: getTriggerKey(item) } : item
     );
 
     setAnnouncements(updatedAnnouncements);
+
+    if (skippedItems.length) {
+      pushStatus(
+        `Jadwal ${skippedItems.map((item) => item.title).join(', ')} jam ${currentHHMM} dilewati karena sedang waktu sholat/adzan.`,
+        'info'
+      );
+    }
+
+    if (!dueItems.length) return;
 
     const nextQueue = [...pendingQueue];
     dueItems.forEach((item) => {
@@ -1098,24 +1708,9 @@ export default function Page() {
   useEffect(() => {
     if (!bootstrapped) return;
     if (prayerConfig.mode !== 'auto') return;
-    if (!prayerConfig.useBrowserLocation) return;
-    if (hasValidCoordinates(prayerConfig)) return;
-    if (attemptedInitialLocationRef.current) return;
+    if (!hasValidCity(prayerConfig)) return;
 
-    attemptedInitialLocationRef.current = true;
-    requestBrowserLocation({ quiet: true, refreshAfter: true }).catch((err) => {
-      console.error('Unhandled error in request browser location:', err);
-    });
-  }, [bootstrapped, prayerConfig]);
-
-  useEffect(() => {
-    if (!bootstrapped) return;
-    if (prayerConfig.mode !== 'auto') return;
-    if (!hasValidCoordinates(prayerConfig)) return;
-
-    const latitude = Number(prayerConfig.latitude).toFixed(6);
-    const longitude = Number(prayerConfig.longitude).toFixed(6);
-    const requestKey = `${todayKey}|${latitude}|${longitude}|${prayerConfig.method}`;
+    const requestKey = `${todayKey}|myquran|${String(prayerConfig.cityId).trim()}`;
 
     if (prayerApiCache.requestKey === requestKey && prayerApiCache.dateKey === todayKey) {
       return;
@@ -1127,9 +1722,7 @@ export default function Page() {
   }, [
     bootstrapped,
     prayerConfig.mode,
-    prayerConfig.latitude,
-    prayerConfig.longitude,
-    prayerConfig.method,
+    prayerConfig.cityId,
     todayKey,
     prayerApiCache.requestKey,
     prayerApiCache.dateKey,
@@ -1154,7 +1747,7 @@ export default function Page() {
       await new Promise(resolve => setTimeout(resolve, 0));
       
       const bg = backgroundAudioRef.current;
-      const shouldPlay = bg && backgroundUrl && shouldEnableBackground && !prayerState.active && !activeAnnouncementId && !pendingQueue.length;
+      const shouldPlay = bg && backgroundUrl && shouldEnableBackground && !prayerState.active && !adzanPlayingRef.current && !activeAnnouncementId && !pendingQueue.length;
       
       if (shouldPlay) {
         try {
@@ -1258,6 +1851,18 @@ export default function Page() {
       return;
     }
 
+    const intervalMinutes = newAnnouncementPeriodic ? Number.parseInt(newAnnouncementInterval, 10) || 0 : 0;
+    if (newAnnouncementPeriodic) {
+      if (intervalMinutes < 1) {
+        pushStatus('Interval pengulangan minimal 1 menit.', 'error');
+        return;
+      }
+      if (!newAnnouncementEndTime || timeToMinutes(newAnnouncementEndTime) < timeToMinutes(newAnnouncementTime)) {
+        pushStatus('Jam selesai harus sama dengan atau setelah jam mulai (di hari yang sama).', 'error');
+        return;
+      }
+    }
+
     if (!file) {
       pushStatus('File audio announcement belum dipilih.', 'error');
       return;
@@ -1275,6 +1880,8 @@ export default function Page() {
         id: createId('schedule'),
         title: newAnnouncementTitle.trim(),
         time: newAnnouncementTime,
+        intervalMinutes,
+        endTime: intervalMinutes > 0 ? newAnnouncementEndTime : '',
         repeatCount,
         blobId: blobData.blobId,
         fileUrl: blobData.url,
@@ -1288,6 +1895,9 @@ export default function Page() {
       setNewAnnouncementTitle('');
       setNewAnnouncementTime('08:00');
       setNewAnnouncementRepeatCount(1);
+      setNewAnnouncementPeriodic(false);
+      setNewAnnouncementInterval(15);
+      setNewAnnouncementEndTime('15:00');
       setNewAnnouncementFileName('');
       if (newAnnouncementFileRef.current) {
         newAnnouncementFileRef.current.value = '';
@@ -1295,7 +1905,12 @@ export default function Page() {
 
       setIsSavingAnnouncement(false);
       setShowAnnouncementModal(false);
-      pushStatus(`Announcement ${item.title} jam ${item.time} disimpan untuk ${item.repeatCount} kali putar.`, 'success');
+      pushStatus(
+        item.intervalMinutes > 0
+          ? `Announcement ${item.title} disimpan: tiap ${item.intervalMinutes} menit, ${item.time}–${item.endTime}, ${item.repeatCount} kali putar per jadwal.`
+          : `Announcement ${item.title} jam ${item.time} disimpan untuk ${item.repeatCount} kali putar.`,
+        'success'
+      );
     } catch (error) {
       console.error(error);
 
@@ -1394,9 +2009,10 @@ export default function Page() {
   }
 
   async function handlePlayManual(item) {
+    // Tombol Putar = tes suara, jadi tetap boleh walau jadwal announcement sedang Off
     if (!item.enabled) {
-      pushStatus(`Announcement "${item.title}" sedang Off. Aktifkan dulu jika ingin diputar.`, 'warning');
-      return;
+      manualTestIdsRef.current.add(item.id);
+      pushStatus(`Tes suara "${item.title}" (jadwal sedang Off, hanya diputar manual).`, 'info');
     }
 
     const updatedQueue = [...createAnnouncementQueueEntries(item), ...pendingQueue];
@@ -1411,6 +2027,57 @@ export default function Page() {
     }
 
     await processQueueIfPossible(updatedQueue);
+  }
+
+  async function handleStopAnnouncement(item) {
+    const id = item.id;
+    const wasActive = activeAnnouncementIdRef.current === id;
+    const remainingQueue = pendingQueue.filter((queueId) => queueId !== id);
+
+    setPendingQueue(remainingQueue);
+    manualTestIdsRef.current.delete(id);
+
+    if (!wasActive) {
+      pushStatus(`Antrian announcement "${item.title}" dibatalkan.`, 'info');
+      return;
+    }
+
+    // Suppress error events yang muncul saat src dikosongkan
+    isStoppingRef.current = true;
+    announcementBusyRef.current = false;
+
+    const audio = announcementAudioRef.current;
+    if (audio) {
+      audio.pause();
+      try {
+        audio.currentTime = 0;
+      } catch (e) {
+        // abaikan
+      }
+      audio.removeAttribute('src');
+      audio.load();
+    }
+
+    activeAnnouncementIdRef.current = null;
+    setActiveAnnouncementId(null);
+
+    // Jika adzan sempat menjeda announcement ini, jangan dilanjutkan lagi setelah adzan selesai
+    if (adzanPlayingRef.current) {
+      adzanPlayingRef.current.interruptedAnnouncement = false;
+    }
+
+    setTimeout(() => {
+      isStoppingRef.current = false;
+    }, 100);
+
+    pushStatus(`Announcement "${item.title}" dihentikan.`, 'info');
+
+    if (prayerState.active || adzanPlayingRef.current) {
+      return;
+    }
+
+    // Lanjut ke announcement berikutnya, atau kembalikan backsound jika antrian kosong
+    await processQueueIfPossible(remainingQueue);
   }
 
   function handleManualPrayerTimeChange(name, value) {
@@ -1436,13 +2103,7 @@ export default function Page() {
     const updated = { ...prayerConfig, mode };
     setPrayerConfig(updated);
     persistPrayerConfig(updated);
-    pushStatus(mode === 'auto' ? 'Mode jadwal sholat diubah ke otomatis API.' : 'Mode jadwal sholat diubah ke manual.', 'info');
-  }
-
-  function handleCoordinateChange(field, value) {
-    const updated = { ...prayerConfig, [field]: value, useBrowserLocation: false };
-    setPrayerConfig(updated);
-    persistPrayerConfig(updated);
+    pushStatus(mode === 'auto' ? 'Mode jadwal sholat diubah ke otomatis API (Kemenag via MyQuran).' : 'Mode jadwal sholat diubah ke manual.', 'info');
   }
 
   function handleAnnouncementError(error) {
@@ -1452,8 +2113,7 @@ export default function Page() {
       return;
     }
     
-    console.error('Announcement audio error:', error);
-    const audioEl = announcementAudioRef.current;
+    const audioEl = error?.currentTarget || announcementAudioRef.current;
     
     // Don't show error if src is not set (intentionally cleared)
     if (!audioEl || !audioEl.src) {
@@ -1463,7 +2123,15 @@ export default function Page() {
     
     if (audioEl && audioEl.error) {
       const errorMsg = getAudioErrorMessage(audioEl.error);
-      console.error('Audio error details:', errorMsg);
+      // Event DOM tidak bisa di-serialize (tampil sebagai {}), jadi catat field yang berguna saja
+      console.warn('Announcement audio error:', {
+        code: audioEl.error.code,
+        message: audioEl.error.message || '',
+        detail: errorMsg,
+        src: audioEl.currentSrc || audioEl.src,
+        networkState: audioEl.networkState,
+        readyState: audioEl.readyState,
+      });
 
       skipFailedAnnouncement(`Gagal memutar announcement (${errorMsg}). Lanjut ke announcement berikutnya...`).catch((queueError) => {
         console.error('Failed to skip broken announcement:', queueError);
@@ -1512,6 +2180,7 @@ export default function Page() {
 
     const updatedQueue = pendingQueue.slice(1);
     setPendingQueue(updatedQueue);
+    pruneManualTestIds(manualTestIdsRef.current, updatedQueue, null);
 
     if (prayerState.active) {
       pushStatus(`Announcement selesai. Backsound tetap dijeda karena waktu ${toPrayerLabel(prayerState.prayerName)} masih berjalan.`, 'warning');
@@ -1550,7 +2219,24 @@ export default function Page() {
       setActiveAnnouncementId(null);
       setBackgroundEnabled(false);
       setAudioReady(false);
+      [adzanNormalAudioRef.current, adzanSubuhAudioRef.current].forEach((adzanAudio) => {
+        if (!adzanAudio) return;
+        adzanAudio.pause();
+        try {
+          adzanAudio.currentTime = 0;
+        } catch (e) {
+          // abaikan
+        }
+      });
+      // Tandai adzan yang sedang berjalan sebagai sudah diputar agar tidak terulang
+      if (adzanPlayingRef.current && !adzanPlayingRef.current.isTest) {
+        markAdzanPlayed(adzanPlayingRef.current.prayerName);
+      }
+      adzanPlayingRef.current = null;
+      setAdzanPlaying(null);
+
       setPendingQueue([]);
+      manualTestIdsRef.current.clear();
       pushStatus('Semua audio dihentikan.', 'info');
 
       // Give error events time to fire and be caught by the suppression flag
@@ -1566,8 +2252,8 @@ export default function Page() {
 
   const prayerSourceSummary = prayerConfig.mode === 'auto'
     ? prayerApiCache.fetchedAt
-      ? `API • ${prayerApiCache.source || 'koordinat manual'} • ${getPrayerMethodLabel(prayerConfig.method)}`
-      : 'API belum sinkron'
+      ? `API MyQuran • ${prayerApiCache.source || prayerConfig.cityName || 'kota belum dipilih'} • Kemenag RI`
+      : hasValidCity(prayerConfig) ? 'API belum sinkron' : 'API • pilih kota terlebih dahulu'
     : 'Manual';
 
   if (!bootstrapped) {
@@ -1586,13 +2272,29 @@ export default function Page() {
     <main className="page-shell">
       <audio ref={backgroundAudioRef} src={backgroundUrl || undefined} preload="auto" loop crossOrigin="anonymous" onError={handleBackgroundError} />
       <audio ref={announcementAudioRef} preload="auto" onEnded={handleAnnouncementEnded} onError={handleAnnouncementError} crossOrigin="anonymous" />
+      <audio
+        ref={adzanNormalAudioRef}
+        src={adzanNormalSrc}
+        preload="auto"
+        onCanPlayThrough={() => handleAdzanFileReady('normal')}
+        onEnded={handleAdzanEnded}
+        onError={() => handleAdzanFileError('normal')}
+      />
+      <audio
+        ref={adzanSubuhAudioRef}
+        src={adzanSubuhSrc}
+        preload="auto"
+        onCanPlayThrough={() => handleAdzanFileReady('subuh')}
+        onEnded={handleAdzanEnded}
+        onError={() => handleAdzanFileError('subuh')}
+      />
 
       <section className="hero-card">
         <div>
           <p className="eyebrow">IT Rayhan Hospital</p>
           <h1>Audio Pengumuman Otomatis</h1>
           <p className="hero-text">
-            Backsound standby berjalan otomatis. Dijeda saat waktu sholat. Paused saat ada announcement. Jadwal dapat dari API atau manual.
+            Musik latar diputar otomatis selama jam operasional. Saat waktu sholat tiba, adzan berkumandang dan semua suara dijeda. Saat ada pengumuman terjadwal, musik latar berhenti sebentar lalu lanjut sendiri. Jadwal sholat bisa diambil otomatis dari API atau diatur manual.
           </p>
         </div>
         <div className="hero-time">
@@ -1605,7 +2307,7 @@ export default function Page() {
         <div className="panel clock-panel">
           <div className="panel-header">
             <h2>Status Monitor</h2>
-            <span className={`badge badge-${status.type || 'info'}`}>{status.type || 'info'}</span>
+            <span className={`badge badge-${status.type || 'info'}`}>{STATUS_TYPE_LABELS[status.type] || 'Info'}</span>
           </div>
           <div className="hero-actions">
           <button className="primary-button" onClick={handleUnlockAudio}>
@@ -1615,14 +2317,20 @@ export default function Page() {
             Stop Audio
           </button>
         </div>
+
+          <div className={`monitor-state monitor-state-${monitorState.tone}`} role="status" aria-live="polite">
+            <strong>{monitorState.title}</strong>
+            <p>{monitorState.detail}</p>
+          </div>
+
           <div className="info-list" style={{ marginTop: '14px' }}>
           <div>
-            <span>Jadwal aktif</span>
+            <span>Jadwal backsound</span>
             <strong>{backgroundStartTime} - {backgroundEndTime}</strong>
           </div>
             <div>
-              <span>Audio</span>
-              <strong>{audioReady ? '✓ Aktif' : 'Belum aktif'}</strong>
+              <span>Audio browser</span>
+              <strong>{audioReady ? '✓ Aktif, suara bisa diputar' : 'Belum aktif - klik "Aktifkan Audio"'}</strong>
             </div>
             <div>
               <span>Backsound</span>
@@ -1632,13 +2340,35 @@ export default function Page() {
               <span>Announcement</span>
               <strong>
                 {activeAnnouncementId
-                  ? announcements.find((item) => item.id === activeAnnouncementId)?.title || 'Sedang diputar'
-                  : 'Tidak ada'}
+                  ? `▶ ${announcements.find((item) => item.id === activeAnnouncementId)?.title || 'Sedang diputar'}`
+                  : nextAnnouncementInfo
+                    ? `Tidak ada yang diputar. Berikutnya: ${nextAnnouncementInfo.item.title} (${formatDuration(nextAnnouncementInfo.inMinutes)} lagi)`
+                    : 'Tidak ada yang diputar. Belum ada jadwal aktif'}
               </strong>
             </div>
             <div>
               <span>Antrian</span>
-              <strong>{pendingQueue.length} item</strong>
+              <strong>{waitingQueueCount ? `${waitingQueueCount} item menunggu giliran` : 'Kosong'}</strong>
+            </div>
+            <div>
+              <span>Adzan</span>
+              <strong>
+                {adzanPlaying
+                  ? `▶ ${adzanPlaying.isTest ? 'Tes adzan' : `Berkumandang - ${toPrayerLabel(adzanPlaying.prayerName)}`}`
+                  : !adzanSettings.enabled
+                    ? 'Nonaktif - adzan otomatis dimatikan'
+                    : nextPrayerInfo
+                      ? `Siaga - ${toPrayerLabel(nextPrayerInfo.key)} ${nextPrayerInfo.time} (${formatDuration(nextPrayerInfo.inMinutes)} lagi)`
+                      : 'Siaga'}
+              </strong>
+            </div>
+            <div>
+              <span>Jeda sholat</span>
+              <strong>
+                {prayerState.active
+                  ? `Aktif - ${toPrayerLabel(prayerState.prayerName)} sampai ${minutesToTime(prayerState.end)}`
+                  : 'Tidak sedang jeda'}
+              </strong>
             </div>
           </div>
         </div>
@@ -1683,6 +2413,117 @@ export default function Page() {
               {backgroundMeta?.name || 'Tidak ada'}
             </strong>
           </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-header">
+            <h2>Adzan</h2>
+            {adzanPlaying && (
+              <button className="danger-button" onClick={stopAdzan} style={{ padding: '8px 16px', fontSize: '14px', whiteSpace: 'nowrap' }}>
+                ■ Stop Adzan
+              </button>
+            )}
+          </div>
+
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={adzanSettings.enabled}
+              onChange={(event) => handleAdzanSettingChange({ enabled: event.target.checked })}
+            />
+            <span>Putar adzan otomatis saat masuk waktu sholat</span>
+          </label>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginTop: '10px' }}>
+            {Object.keys(DEFAULT_ADZAN_SETTINGS.prayers).map((key) => (
+              <label className="toggle-row" key={key} style={{ opacity: adzanSettings.enabled ? 1 : 0.5 }}>
+                <input
+                  type="checkbox"
+                  disabled={!adzanSettings.enabled}
+                  checked={Boolean(adzanSettings.prayers[key])}
+                  onChange={(event) => handleAdzanPrayerToggle(key, event.target.checked)}
+                />
+                <span>
+                  {toPrayerLabel(key)}
+                  {adzanPlayedToday.includes(key) ? ' ✓' : ''}
+                </span>
+              </label>
+            ))}
+          </div>
+
+          <label className="field" style={{ marginTop: '10px' }}>
+            <span>Volume Adzan: {Math.round(adzanSettings.volume * 100)}%</span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={adzanSettings.volume}
+              onChange={(event) => handleAdzanSettingChange({ volume: Number(event.target.value) })}
+            />
+          </label>
+
+          <div className="hero-actions" style={{ marginTop: '10px' }}>
+            <button
+              className="secondary-button"
+              disabled={Boolean(adzanPlaying)}
+              onClick={() => playAdzan('dzuhur', { isTest: true, type: 'normal' })}
+              style={{ padding: '8px 14px', fontSize: '13px' }}
+            >
+              ▶ Tes Adzan
+            </button>
+            <button
+              className="secondary-button"
+              disabled={Boolean(adzanPlaying)}
+              onClick={() => playAdzan('subuh', { isTest: true, type: 'subuh' })}
+              style={{ padding: '8px 14px', fontSize: '13px' }}
+            >
+              ▶ Tes Adzan Subuh
+            </button>
+          </div>
+
+          {ADZAN_TYPES.map((type) => {
+            const savedUrl = String(adzanSettings.urls?.[type] || '').trim();
+            const draftUrl = adzanUrlDrafts[type] || '';
+            const isDirty = draftUrl.trim() !== savedUrl;
+            const status = savedUrl ? adzanFileStatus[type] : 'empty';
+
+            return (
+              <div key={type} className="field" style={{ marginTop: '10px' }}>
+                <span>
+                  {type === 'subuh' ? 'URL adzan Subuh' : 'URL adzan biasa (Dzuhur, Ashar, Maghrib, Isya)'}{' '}
+                  <strong
+                    style={{
+                      color:
+                        status === 'missing' ? 'var(--danger)' : status === 'ready' ? 'var(--success)' : status === 'empty' ? 'var(--amber)' : 'var(--muted)',
+                    }}
+                  >
+                    ({status === 'ready' ? '✓ siap' : status === 'missing' ? '✗ gagal dimuat' : status === 'empty' ? 'belum diisi' : 'memuat...'})
+                  </strong>
+                </span>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <input
+                    type="url"
+                    placeholder="https://contoh.com/adzan.mp3"
+                    value={draftUrl}
+                    onChange={(event) => setAdzanUrlDrafts((prev) => ({ ...prev, [type]: event.target.value }))}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') handleSaveAdzanUrl(type);
+                    }}
+                    style={{ flex: 1, minWidth: 0 }}
+                  />
+                  <button
+                    className="secondary-button"
+                    disabled={!isDirty}
+                    onClick={() => handleSaveAdzanUrl(type)}
+                    style={{ padding: '6px 12px', fontSize: '12px', whiteSpace: 'nowrap' }}
+                  >
+                    Simpan
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </section>
 
@@ -1750,7 +2591,10 @@ export default function Page() {
                     <div className="announcement-content">
                       <h3>{item.title}</h3>
                       <div className="announcement-meta">
-                        <span className="announcement-time">{item.time}</span>
+                        <span className="announcement-time">
+                          {item.intervalMinutes > 0 ? `${item.time}–${item.endTime}` : item.time}
+                        </span>
+                        {item.intervalMinutes > 0 && <span className="tag tag-repeat">tiap {item.intervalMinutes} mnt</span>}
                         <span className="tag tag-repeat">{item.repeatCount || 1}x putar</span>
                       </div>
                       <div className="card-tags">
@@ -1761,9 +2605,15 @@ export default function Page() {
                     </div>
 
                     <div className="card-actions" style={{ alignSelf: 'center', gap: '4px', margin: 0 }}>
-                      <button className="secondary-button" onClick={() => handlePlayManual(item)} style={{ padding: '6px 10px', fontSize: '12px' }}>
-                        Putar
-                      </button>
+                      {active || queued ? (
+                        <button className="danger-button" onClick={() => handleStopAnnouncement(item)} style={{ padding: '6px 10px', fontSize: '12px' }}>
+                          Stop
+                        </button>
+                      ) : (
+                        <button className="secondary-button" onClick={() => handlePlayManual(item)} style={{ padding: '6px 10px', fontSize: '12px' }}>
+                          Putar
+                        </button>
+                      )}
                       <button className="secondary-button" onClick={() => handleToggleAnnouncement(item.id)} style={{ padding: '6px 10px', fontSize: '12px' }}>
                         {item.enabled ? 'Off' : 'On'}
                       </button>
@@ -1800,13 +2650,50 @@ export default function Page() {
               </label>
 
               <label className="field">
-                <span>Jam putar</span>
+                <span>{newAnnouncementPeriodic ? 'Jam mulai' : 'Jam putar'}</span>
                 <input
                   type="time"
                   value={newAnnouncementTime}
                   onChange={(event) => setNewAnnouncementTime(event.target.value)}
                 />
               </label>
+
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={newAnnouncementPeriodic}
+                  onChange={(event) => setNewAnnouncementPeriodic(event.target.checked)}
+                />
+                <span>Ulangi berkala sampai jam tertentu</span>
+              </label>
+
+              {newAnnouncementPeriodic && (
+                <>
+                  <label className="field">
+                    <span>Ulangi setiap (menit)</span>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={newAnnouncementInterval}
+                      onChange={(event) => setNewAnnouncementInterval(event.target.value)}
+                    />
+                  </label>
+
+                  <label className="field">
+                    <span>Jam selesai</span>
+                    <input
+                      type="time"
+                      value={newAnnouncementEndTime}
+                      onChange={(event) => setNewAnnouncementEndTime(event.target.value)}
+                    />
+                    <small>
+                      Diputar pada jam mulai, lalu tiap {newAnnouncementInterval || '…'} menit sampai jam selesai (termasuk jam selesai jika pas).
+                      Jadwal yang jatuh saat waktu sholat/adzan dilewati.
+                    </small>
+                  </label>
+                </>
+              )}
 
               <label className="field">
                 <span>Jumlah putar</span>
@@ -1872,31 +2759,61 @@ export default function Page() {
 
               {prayerConfig.mode === 'auto' ? (
                 <>
-                  <label className="field" style={{ marginTop: '12px' }}>
-                    <span>Latitude</span>
-                    <input
-                      type="number"
-                      step="0.000001"
-                      value={prayerConfig.latitude}
-                      onChange={(event) => handleCoordinateChange('latitude', event.target.value)}
-                    />
-                  </label>
+                  <div style={{ fontSize: '12px', color: 'var(--muted)', marginTop: '12px' }}>
+                    Sumber: API MyQuran (jadwal resmi Kemenag RI)
+                  </div>
 
-                  <label className="field" style={{ marginTop: '10px' }}>
-                    <span>Longitude</span>
-                    <input
-                      type="number"
-                      step="0.000001"
-                      value={prayerConfig.longitude}
-                      onChange={(event) => handleCoordinateChange('longitude', event.target.value)}
-                    />
-                  </label>
+                  <div className="field" style={{ marginTop: '10px' }}>
+                    <span>Kota / Kabupaten terpilih</span>
+                    <strong>
+                      {hasValidCity(prayerConfig)
+                        ? `${prayerConfig.cityName || 'Tanpa nama'} (ID ${prayerConfig.cityId})`
+                        : 'Belum dipilih'}
+                    </strong>
+                  </div>
+
+                  <form onSubmit={searchPrayerCity}>
+                    <label className="field" style={{ marginTop: '10px' }}>
+                      <span>Cari kota / kabupaten</span>
+                      <div style={{ display: 'flex', gap: '6px' }}>
+                        <input
+                          type="text"
+                          placeholder="contoh: padang, jakarta, bandung"
+                          value={citySearchQuery}
+                          onChange={(event) => setCitySearchQuery(event.target.value)}
+                          style={{ flex: 1 }}
+                        />
+                        <button className="secondary-button" type="submit" disabled={citySearchLoading}>
+                          {citySearchLoading ? 'Mencari...' : 'Cari'}
+                        </button>
+                      </div>
+                    </label>
+                  </form>
+
+                  {citySearchResults.length > 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px', maxHeight: '180px', overflowY: 'auto' }}>
+                      {citySearchResults.map((city) => (
+                        <button
+                          key={city.id}
+                          type="button"
+                          className={String(city.id) === String(prayerConfig.cityId) ? 'primary-button' : 'secondary-button'}
+                          onClick={() => handleSelectPrayerCity(city)}
+                          disabled={prayerLoading}
+                          style={{ textAlign: 'left' }}
+                        >
+                          {toTitleCase(city.lokasi)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
 
                   <div className="card-actions" style={{ marginTop: '10px' }}>
-                    <button className="secondary-button" type="button" onClick={() => requestBrowserLocation({ quiet: false, refreshAfter: true })}>
-                      Ambil dari Browser
-                    </button>
-                    <button className="secondary-button" type="button" onClick={() => fetchPrayerTimesFromApi({ quiet: false })} disabled={prayerLoading}>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => fetchPrayerTimesFromApi({ quiet: false })}
+                      disabled={prayerLoading || !hasValidCity(prayerConfig)}
+                    >
                       {prayerLoading ? 'Mengambil...' : 'Refresh API'}
                     </button>
                   </div>
